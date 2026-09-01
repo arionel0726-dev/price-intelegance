@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: price-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: price
+      POSTGRES_USER: price
+      POSTGRES_PASSWORD: price
+
+    ports:
+      - '5432:5432'
+
+    volumes:
+      - price_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  price_postgres_data:

@@ -1,0 +1,32 @@
+{
+	"name": "@price/db",
+	"private": true,
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"default": "./dist/index.js"
+		}
+	},
+	"scripts": {
+		"build": "tsc",
+		"dev": "tsc --watch",
+		"typecheck": "tsc --noEmit",
+		"db:generate": "drizzle-kit generate",
+		"db:migrate": "drizzle-kit migrate",
+		"db:studio": "drizzle-kit studio",
+		"db:seed": "bun src/seed.ts"
+	},
+	"dependencies": {
+		"drizzle-orm": "^0.45.2",
+		"postgres": "^3.4.7"
+	},
+	"devDependencies": {
+		"@types/node": "^26.4.0",
+		"drizzle-kit": "^0.31.0",
+		"typescript": "^6.0.0"
+	}
+}
