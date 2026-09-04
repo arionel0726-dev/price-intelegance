@@ -1,5 +1,6 @@
 import {
 	competitorProducts,
+	competitorProductVariants,
 	competitors,
 	createDatabase,
 	matches,
@@ -12,6 +13,7 @@ const { db, client } = createDatabase(
 
 async function seed() {
 	await db.delete(matches)
+	await db.delete(competitorProductVariants)
 	await db.delete(competitorProducts)
 	await db.delete(competitors)
 	await db.delete(products)
@@ -20,6 +22,7 @@ async function seed() {
 		.insert(products)
 		.values([
 			{
+				sourceKey: 'seed-100001',
 				article: '100001',
 				barcode: '3145891073607',
 				brand: 'Chanel',
@@ -29,9 +32,11 @@ async function seed() {
 				volume: '100 ml',
 				color: null,
 				imageUrl: null,
-				price: '2199.00'
+				price: '2199.00',
+				regularPrice: '2199.00'
 			},
 			{
+				sourceKey: 'seed-100002',
 				article: '100002',
 				barcode: '3614272648401',
 				brand: 'Lancôme',
@@ -41,9 +46,11 @@ async function seed() {
 				volume: '50 ml',
 				color: null,
 				imageUrl: null,
-				price: '1899.00'
+				price: '1899.00',
+				regularPrice: '1899.00'
 			},
 			{
+				sourceKey: 'seed-100003',
 				article: '100003',
 				barcode: '3348901486385',
 				brand: 'Dior',
@@ -53,9 +60,11 @@ async function seed() {
 				volume: '100 ml',
 				color: null,
 				imageUrl: null,
-				price: '2499.00'
+				price: '2499.00',
+				regularPrice: '2499.00'
 			},
 			{
+				sourceKey: 'seed-100004',
 				article: '100004',
 				barcode: '3274872440872',
 				brand: 'Givenchy',
@@ -65,7 +74,8 @@ async function seed() {
 				volume: '80 ml',
 				color: null,
 				imageUrl: null,
-				price: '2099.00'
+				price: '2099.00',
+				regularPrice: '2099.00'
 			}
 		])
 		.returning()
@@ -105,77 +115,135 @@ async function seed() {
 		.values([
 			{
 				competitorId: makeup.id,
-				title: 'Bleu de Chanel Eau de Parfum 100 ml',
+				externalId: 'seed-chanel-bleu',
+				title: 'Bleu de Chanel Eau de Parfum',
+				brand: 'Chanel',
 				imageUrl: null,
-				price: '2099.00',
 				url: 'https://makeup.md/chanel-bleu-edp-100',
-				available: true
+				currency: 'MDL'
 			},
 			{
 				competitorId: brocard.id,
-				title: 'Chanel Bleu de Chanel EDP 100 ml',
+				externalId: 'seed-chanel-bleu',
+				title: 'Chanel Bleu de Chanel EDP',
+				brand: 'Chanel',
 				imageUrl: null,
-				price: '2350.00',
 				url: 'https://brocard.md/chanel-bleu-edp-100',
-				available: true
+				currency: 'MDL'
 			},
 			{
 				competitorId: makeup.id,
-				title: 'La Vie Est Belle Eau de Parfum 50 ml',
+				externalId: 'seed-lancome-lveb',
+				title: 'La Vie Est Belle Eau de Parfum',
+				brand: 'Lancôme',
 				imageUrl: null,
-				price: '1799.00',
 				url: 'https://makeup.md/lancome-lveb-edp-50',
-				available: true
+				currency: 'MDL'
 			},
 			{
 				competitorId: aroma.id,
-				title: 'Dior Sauvage Eau de Parfum 100 ml',
+				externalId: 'seed-dior-sauvage',
+				title: 'Dior Sauvage Eau de Parfum',
+				brand: 'Dior',
 				imageUrl: null,
-				price: '2399.00',
 				url: 'https://aroma.md/dior-sauvage-edp-100',
-				available: true
+				currency: 'MDL'
 			}
 		])
 		.returning()
 
 	const chanelMakeup = insertedCompetitorProducts.find(
-		item => item.title === 'Bleu de Chanel Eau de Parfum 100 ml'
+		item => item.externalId === 'seed-chanel-bleu' && item.competitorId === makeup.id
 	)!
 
 	const chanelBrocard = insertedCompetitorProducts.find(
-		item => item.title === 'Chanel Bleu de Chanel EDP 100 ml'
+		item => item.externalId === 'seed-chanel-bleu' && item.competitorId === brocard.id
 	)!
 
 	const lancomeMakeup = insertedCompetitorProducts.find(
-		item => item.title === 'La Vie Est Belle Eau de Parfum 50 ml'
+		item => item.externalId === 'seed-lancome-lveb'
 	)!
 
 	const diorAroma = insertedCompetitorProducts.find(
-		item => item.title === 'Dior Sauvage Eau de Parfum 100 ml'
+		item => item.externalId === 'seed-dior-sauvage'
+	)!
+
+	const insertedVariants = await db
+		.insert(competitorProductVariants)
+		.values([
+			{
+				competitorProductId: chanelMakeup.id,
+				externalId: 'seed-chanel-bleu-100',
+				label: '100 ml',
+				volume: '100 ml',
+				price: '2099.00',
+				available: true
+			},
+			{
+				competitorProductId: chanelBrocard.id,
+				externalId: 'seed-chanel-bleu-100',
+				label: '100 ml',
+				volume: '100 ml',
+				price: '2350.00',
+				available: true
+			},
+			{
+				competitorProductId: lancomeMakeup.id,
+				externalId: 'seed-lancome-lveb-50',
+				label: '50 ml',
+				volume: '50 ml',
+				price: '1799.00',
+				available: true
+			},
+			{
+				competitorProductId: diorAroma.id,
+				externalId: 'seed-dior-sauvage-100',
+				label: '100 ml',
+				volume: '100 ml',
+				price: '2399.00',
+				available: true
+			}
+		])
+		.returning()
+
+	const chanelMakeupVariant = insertedVariants.find(
+		item => item.competitorProductId === chanelMakeup.id
+	)!
+
+	const chanelBrocardVariant = insertedVariants.find(
+		item => item.competitorProductId === chanelBrocard.id
+	)!
+
+	const lancomeMakeupVariant = insertedVariants.find(
+		item => item.competitorProductId === lancomeMakeup.id
+	)!
+
+	const diorAromaVariant = insertedVariants.find(
+		item => item.competitorProductId === diorAroma.id
 	)!
 
 	await db.insert(matches).values([
 		{
 			productId: chanel.id,
-			competitorProductId: chanelMakeup.id,
+			competitorProductVariantId: chanelMakeupVariant.id,
 			source: 'algorithm',
 			score: 95
 		},
 		{
 			productId: chanel.id,
-			competitorProductId: chanelBrocard.id,
+			competitorProductVariantId: chanelBrocardVariant.id,
 			source: 'algorithm',
 			score: 91
 		},
 		{
 			productId: lancome.id,
-			competitorProductId: lancomeMakeup.id,
+			competitorProductVariantId: lancomeMakeupVariant.id,
 			source: 'algorithm',
 			score: 94
 		},
 		{
 			productId: dior.id,
-			competitorProductId: diorAroma.id,
+			competitorProductVariantId: diorAromaVariant.id,
 			source: 'manual',
 			score: 100
 		}

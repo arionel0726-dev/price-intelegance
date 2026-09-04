@@ -1,10 +1,10 @@
 import Image from 'next/image'
 import Link from 'next/link'
 
-import type { Product } from '../types/product'
+import type { ProductFamily } from '../types/product'
 
 type ProductCardProps = {
-	product: Product
+	product: ProductFamily
 }
 
 export function ProductCard({ product }: ProductCardProps) {
@@ -38,16 +38,22 @@ export function ProductCard({ product }: ProductCardProps) {
 						{product.name}
 					</h2>
 
-					{product.volume && (
+					{product.variantLabel ? (
 						<p className="mt-1 text-sm text-muted-foreground">
-							{product.volume}
+							{product.variantLabel}
 						</p>
+					) : (
+						product.volume && (
+							<p className="mt-1 text-sm text-muted-foreground">
+								{product.volume}
+							</p>
+						)
 					)}
 
 					<div className="mt-4 flex items-center justify-between gap-3">
 						<p className="text-lg font-semibold tabular-nums">
 							{product.price
-								? `${Number(product.price).toLocaleString('ro-MD')} MDL`
+								? `${product.priceVaries ? 'from ' : ''}${Number(product.price).toLocaleString('ro-MD')} MDL`
 								: '—'}
 						</p>
 

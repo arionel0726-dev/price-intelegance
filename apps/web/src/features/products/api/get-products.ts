@@ -1,7 +1,24 @@
 import { apiFetch } from '@/lib/api/client'
 
-import type { Product } from '../types/product'
+import type { ProductsPage } from '../types/product'
 
-export function getProducts() {
-	return apiFetch<Product[]>('/products')
+export type GetProductsParams = {
+	page?: number
+	limit?: number
+	search?: string
+	brand?: string
+	category?: string
+}
+
+export function getProducts(params: GetProductsParams) {
+	return apiFetch<ProductsPage>('/products', {
+		params: {
+			page: params.page,
+			limit: params.limit,
+			search: params.search || undefined,
+			brand: params.brand && params.brand !== 'all' ? params.brand : undefined,
+			category:
+				params.category && params.category !== 'all' ? params.category : undefined
+		}
+	})
 }

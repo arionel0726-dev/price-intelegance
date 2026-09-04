@@ -5,11 +5,12 @@ import { useProductDetails } from '@/features/products/queries/use-product-detai
 import { ArrowLeft, Barcode, Check, Copy, ExternalLink } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
-import { useParams } from 'next/navigation'
+import { useParams, useRouter } from 'next/navigation'
 import { useState } from 'react'
 import { toast } from 'sonner'
 export default function ProductDetailsPage() {
 	const params = useParams()
+	const router = useRouter()
 	const id = Number(params.id)
 
 	const { data, isLoading, isError } = useProductDetails(id)
@@ -36,7 +37,13 @@ export default function ProductDetailsPage() {
 		)
 	}
 
-	const { product, competitors, similarProducts } = data
+	const { product, variantType, siblings, competitors } = data
+	const hasVariantSelector = siblings.length > 1
+
+	function goToVariant(variantId: number) {
+		if (variantId === product.id) return
+		router.push(`/products/${variantId}`)
+	}
 
 	return (
 		<div className="min-h-screen bg-background">
@@ -81,6 +88,56 @@ export default function ProductDetailsPage() {
 								? `${Number(product.price).toLocaleString('ro-MD')} MDL`
 								: '—'}
 						</p>
+
+						{product.url && (
+							<a
+								href={product.url}
+								target="_blank"
+								rel="noopener noreferrer"
+								className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground hover:underline underline-offset-4"
+							>
+								Open on Vizaje-Nica
+								<ExternalLink className="size-4" />
+							</a>
+						)}
+
+						{hasVariantSelector && (
+							<div className="mt-8">
+								<p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
+									{variantType === 'volume'
+										? 'Volume'
+										: variantType === 'shade'
+											? 'Shade'
+											: 'Variant'}
+								</p>
+
+								<div className="mt-3 flex flex-wrap gap-2">
+									{siblings.map(sibling => {
+										const isCurrent = sibling.id === product.id
+										const label =
+											variantType === 'shade'
+												? (sibling.color ?? sibling.volume ?? `#${sibling.id}`)
+												: (sibling.volume ?? sibling.color ?? `#${sibling.id}`)
+
+										return (
+											<button
+												key={sibling.id}
+												type="button"
+												onClick={() => goToVariant(sibling.id)}
+												aria-current={isCurrent ? 'true' : undefined}
+												className={
+													isCurrent
+														? 'rounded-full bg-foreground px-4 py-2 text-sm font-medium text-background'
+														: 'rounded-full border px-4 py-2 text-sm font-medium hover:bg-muted'
+												}
+											>
+												{label}
+											</button>
+										)
+									})}
+								</div>
+							</div>
+						)}
 
 						<div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
 							<InfoItem
@@ -205,63 +262,6 @@ export default function ProductDetailsPage() {
 								</div>
 							)}
 						</div>
-					</div>
-				</section>
-
-				<section className="mt-16">
-					<div className="flex items-center justify-between">
-						<h2 className="text-3xl font-semibold tracking-tight">
-							Similar products
-						</h2>
-					</div>
-
-					<div className="mt-8 grid grid-cols-2 gap-x-5 gap-y-10 md:grid-cols-3 lg:grid-cols-4">
-						{similarProducts.map(item => (
-							<Link
-								key={item.id}
-								href={`/products/${item.id}`}
-								className="group block"
-							>
-								<article>
-									<div className="relative aspect-[1/1.12] overflow-hidden bg-[#f6f6f6]">
-										{item.imageUrl ? (
-											<Image
-												src={item.imageUrl}
-												alt={item.name}
-												fill
-												className="object-contain p-8"
-											/>
-										) : (
-											<div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-												No image
-											</div>
-										)}
-									</div>
-
-									<div className="pt-4">
-										<p className="text-xs font-semibold uppercase tracking-[0.12em]">
-											{item.brand}
-										</p>
-
-										<h3 className="mt-2 line-clamp-2 text-base font-medium">
-											{item.name}
-										</h3>
-
-										{item.volume && (
-											<p className="mt-1 text-sm text-muted-foreground">
-												{item.volume}
-											</p>
-										)}
-
-										<p className="mt-4 text-lg font-semibold">
-											{item.price
-												? `${Number(item.price).toLocaleString('ro-MD')} MDL`
-												: '—'}
-										</p>
-									</div>
-								</article>
-							</Link>
-						))}
 					</div>
 				</section>
 			</main>

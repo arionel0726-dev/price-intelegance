@@ -1,60 +1,47 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { Skeleton } from '@/components/ui/skeleton'
+import { useDebouncedValue } from '@/lib/use-debounced-value'
 
+import { useProductFilters } from '../queries/use-product-filters'
 import { useProducts } from '../queries/use-products'
 import { CatalogToolbar } from './catalog-toolbar'
+import { Pagination } from './pagination'
 import { ProductCard } from './product-card'
 
-export function Catalog() {
-	const { data: products = [], isLoading, isError } = useProducts()
+const PAGE_SIZE = 40
 
+export function Catalog() {
+	const [page, setPage] = useState(1)
 	const [search, setSearch] = useState('')
 	const [brand, setBrand] = useState('all')
 	const [category, setCategory] = useState('all')
 
-	const brands = useMemo(() => {
-		return [
-			...new Set(products.map(product => product.brand).filter(Boolean))
-		].sort()
-	}, [products])
+	const debouncedSearch = useDebouncedValue(search, 300)
 
-	const categories = useMemo(() => {
-		return [
-			...new Set(
-				products
-					.map(product => product.category)
-					.filter((value): value is string => value !== null)
-			)
-		].sort()
-	}, [products])
+	const { data: filters } = useProductFilters()
 
-	const filteredProducts = useMemo(() => {
-		const normalizedSearch = search.trim().toLowerCase()
+	const {
+		data,
+		isLoading,
+		isPlaceholderData,
+		isError
+	} = useProducts({
+		page,
+		limit: PAGE_SIZE,
+		search: debouncedSearch,
+		brand,
+		category
+	})
 
-		return products.filter(product => {
-			const matchesBrand = brand === 'all' || product.brand === brand
-
-			const matchesCategory =
-				category === 'all' || product.category === category
-
-			const matchesSearch =
-				normalizedSearch.length === 0 ||
-				[
-					product.name,
-					product.brand,
-					product.article,
-					product.barcode,
-					product.volume
-				]
-					.filter(Boolean)
-					.some(value => value!.toLowerCase().includes(normalizedSearch))
-
-			return matchesBrand && matchesCategory && matchesSearch
-		})
-	}, [products, search, brand, category])
+	// Search/brand/category change -> back to page 1. Watches the DEBOUNCED
+	// search value (not every keystroke) so this only fires once per actual
+	// query change, not on every character typed.
+	useEffect(() => {
+		setPage(1)
+	}, [debouncedSearch, brand, category])
 
 	function resetFilters() {
 		setSearch('')
@@ -74,14 +61,17 @@ export function Catalog() {
 		)
 	}
 
+	const products = data?.items ?? []
+	const pagination = data?.pagination
+
 	return (
 		<>
 			<CatalogToolbar
 				search={search}
 				brand={brand}
 				category={category}
-				brands={brands}
-				categories={categories}
+				brands={filters?.brands ?? []}
+				categories={filters?.categories ?? []}
 				onSearchChange={setSearch}
 				onBrandChange={setBrand}
 				onCategoryChange={setCategory}
@@ -92,15 +82,20 @@ export function Catalog() {
 				<p className="text-sm text-muted-foreground">
 					{isLoading
 						? 'Loading products...'
-						: `${filteredProducts.length} products`}
+						: `${pagination?.total ?? 0} products`}
 				</p>
 			</div>
 
 			{isLoading ? (
 				<CatalogSkeleton />
-			) : filteredProducts.length > 0 ? (
-				<div className="mt-8 grid grid-cols-2 gap-x-5 gap-y-10 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-					{filteredProducts.map(product => (
+			) : products.length > 0 ? (
+				<div
+					aria-busy={isPlaceholderData}
+					className={`mt-8 grid grid-cols-2 gap-x-5 gap-y-10 transition-opacity md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 ${
+						isPlaceholderData ? 'opacity-50' : ''
+					}`}
+				>
+					{products.map(product => (
 						<div key={product.id}>
 							<ProductCard product={product} />
 						</div>
@@ -114,6 +109,14 @@ export function Catalog() {
 						Try another name, article, barcode or filter.
 					</p>
 				</div>
+			)}
+
+			{pagination && (
+				<Pagination
+					page={pagination.page}
+					totalPages={pagination.totalPages}
+					onPageChange={setPage}
+				/>
 			)}
 		</>
 	)

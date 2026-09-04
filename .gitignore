@@ -19,8 +19,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env
 .env.development.local
 .env.test.local
+.env.production
 .env.production.local
 .env.local
+!.env.production.example
 
 # caches
 .eslintcache
@@ -40,3 +42,4 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Python parser service
 services/parser/.venv
 services/parser/**/__pycache__
+/backups/

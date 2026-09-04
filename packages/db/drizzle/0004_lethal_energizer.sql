@@ -1,0 +1,1 @@
+ALTER TABLE "matches" ADD CONSTRAINT "matches_product_id_competitor_product_variant_id_unique" UNIQUE("product_id","competitor_product_variant_id");

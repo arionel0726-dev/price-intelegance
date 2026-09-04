@@ -1,0 +1,16 @@
+node_modules
+**/node_modules
+**/.next
+**/dist
+**/.turbo
+**/__pycache__
+**/.venv
+.git
+.gitignore
+*.md
+!DEPLOYMENT.md
+backups
+data/vizaje/*.json
+.env
+.env.*
+!.env.*.example

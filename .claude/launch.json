@@ -6,6 +6,12 @@
 			"runtimeExecutable": "sh",
 			"runtimeArgs": ["-c", "cd apps/web && bun run dev"],
 			"port": 3000
+		},
+		{
+			"name": "api",
+			"runtimeExecutable": "sh",
+			"runtimeArgs": ["-c", "cd apps/api && bun run start:dev"],
+			"port": 3001
 		}
 	]
 }

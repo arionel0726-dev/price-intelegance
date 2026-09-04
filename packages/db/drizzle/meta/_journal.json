@@ -15,6 +15,48 @@
       "when": 1788011862334,
       "tag": "0001_large_gravity",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788279195345,
+      "tag": "0002_bouncy_randall_flagg",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788284257577,
+      "tag": "0003_violet_ben_parker",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788290428296,
+      "tag": "0004_lethal_energizer",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788374965355,
+      "tag": "0005_nasty_randall",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788468982079,
+      "tag": "0006_moaning_charles_xavier",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788536432087,
+      "tag": "0007_youthful_namora",
+      "breakpoints": true
     }
   ]
 }

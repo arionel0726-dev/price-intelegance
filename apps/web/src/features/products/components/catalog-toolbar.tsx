@@ -10,6 +10,7 @@ import {
 	SelectValue
 } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
+import type { CategoryGroup } from '../types/product'
 
 type CatalogToolbarProps = {
 	search: string
@@ -17,7 +18,7 @@ type CatalogToolbarProps = {
 	brand: string
 
 	brands: string[]
-	categories: string[]
+	categories: CategoryGroup[]
 
 	onSearchChange: (value: string) => void
 	onCategoryChange: (value: string) => void
@@ -92,21 +93,21 @@ export function CatalogToolbar({
 				</div>
 			</div>
 
-			<div className="flex gap-2 overflow-x-auto">
-				{['all', ...categories].map(item => {
-					const active = category === item
+			<div className="flex flex-wrap gap-2">
+				{[{ key: 'all', label: 'All' }, ...categories].map(item => {
+					const active = category === item.key
 
 					return (
 						<button
-							key={item}
-							onClick={() => onCategoryChange(item)}
+							key={item.key}
+							onClick={() => onCategoryChange(item.key)}
 							className={
 								active
 									? 'rounded-full bg-foreground px-5 py-2 text-sm text-background'
 									: 'rounded-full bg-muted px-5 py-2 text-sm'
 							}
 						>
-							{item === 'all' ? 'All' : item}
+							{item.label}
 						</button>
 					)
 				})}
