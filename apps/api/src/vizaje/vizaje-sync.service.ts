@@ -108,6 +108,30 @@ function sleep(ms: number): Promise<void> {
 
 const execFileAsync = promisify(execFile);
 
+const DEFAULT_VIZAJE_SYNC_TIMEOUT_SECONDS = 10_800; // 3 hours
+
+// How long curl waits for the full-catalog batch response (--max-time)
+// before giving up. Configurable because slower VPS hardware can legitimately
+// take longer than the ~30 min observed locally - a hardcoded 1-hour ceiling
+// killed a real production run mid-crawl. Falls back to the 3-hour default
+// on anything that isn't a positive integer, rather than passing a bad value
+// (or NaN) straight to curl.
+function resolveVizajeSyncTimeoutSeconds(): number {
+  const raw = process.env.VIZAJE_SYNC_TIMEOUT_SECONDS;
+
+  if (raw === undefined) {
+    return DEFAULT_VIZAJE_SYNC_TIMEOUT_SECONDS;
+  }
+
+  const parsed = Number(raw);
+
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return DEFAULT_VIZAJE_SYNC_TIMEOUT_SECONDS;
+  }
+
+  return parsed;
+}
+
 @Injectable()
 export class VizajeSyncService {
   private readonly logger = new Logger(VizajeSyncService.name);
@@ -414,7 +438,7 @@ export class VizajeSyncService {
         '-d',
         '{}',
         '--max-time',
-        String(60 * 60),
+        String(resolveVizajeSyncTimeoutSeconds()),
       ],
       { maxBuffer: 200 * 1024 * 1024 },
     );
