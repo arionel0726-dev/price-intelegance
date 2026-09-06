@@ -48,11 +48,22 @@ export class AuthController {
   private cookieOptions() {
     const ttlSeconds = Number(process.env.AUTH_SESSION_TTL ?? 86400);
 
+    // TEMPORARY: lets a production deployment served over plain HTTP (e.g.
+    // by bare VPS IP, before a domain/TLS cert is in place) still persist
+    // the session cookie - browsers drop Secure cookies over HTTP. Default
+    // (unset, or anything other than the literal string "false") preserves
+    // the normal secure=true-in-production behavior; only an explicit
+    // AUTH_COOKIE_SECURE=false disables it.
+    const secure =
+      process.env.AUTH_COOKIE_SECURE === 'false'
+        ? false
+        : process.env.NODE_ENV === 'production';
+
     return {
       httpOnly: true,
       sameSite: 'lax' as const,
       path: '/',
-      secure: process.env.NODE_ENV === 'production',
+      secure,
       maxAge: ttlSeconds * 1000,
     };
   }
