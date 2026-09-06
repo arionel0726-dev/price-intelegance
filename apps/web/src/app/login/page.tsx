@@ -10,13 +10,21 @@ import { login } from '@/features/auth/api/login'
 export default function LoginPage() {
 	const router = useRouter()
 
-	const [email, setEmail] = useState('')
-	const [password, setPassword] = useState('')
 	const [error, setError] = useState<string | null>(null)
 	const [isSubmitting, setIsSubmitting] = useState(false)
 
-	async function handleSubmit(event: React.FormEvent) {
+	async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
 		event.preventDefault()
+
+		// Read the live DOM values via FormData instead of React state -
+		// browser autofill/password managers (Firefox in particular) can set
+		// an input's visible value without firing a React-observable change
+		// event, leaving controlled state stuck at '' while the field shows
+		// the filled-in value. FormData always reflects what's actually in
+		// the form, regardless of how it got there.
+		const formData = new FormData(event.currentTarget)
+		const email = String(formData.get('email') ?? '')
+		const password = String(formData.get('password') ?? '')
 
 		setError(null)
 		setIsSubmitting(true)
@@ -53,10 +61,9 @@ export default function LoginPage() {
 
 						<Input
 							id="email"
+							name="email"
 							type="email"
 							autoComplete="email"
-							value={email}
-							onChange={event => setEmail(event.target.value)}
 							required
 						/>
 					</div>
@@ -71,10 +78,9 @@ export default function LoginPage() {
 
 						<Input
 							id="password"
+							name="password"
 							type="password"
 							autoComplete="current-password"
-							value={password}
-							onChange={event => setPassword(event.target.value)}
 							required
 						/>
 					</div>
