@@ -25,6 +25,13 @@ RUN bun run --filter=api build
 
 FROM base AS runner
 ENV NODE_ENV=production
+
+# jobs:vizaje shells out to curl for the long-running parser request
+# (intentional - a Bun/Node fetch previously hit the runtime's own socket
+# timeout on that request). oven/bun's base image doesn't include curl.
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+	&& rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app /app
 
 WORKDIR /app/apps/api
