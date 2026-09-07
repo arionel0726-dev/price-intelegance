@@ -77,6 +77,11 @@ class ParsedVizajeVariant(BaseModel):
 
     image_url: str | None = None
 
+    # Display/reference only - the page's visible "Артикул" value. NOT an
+    # identity field (see vizaje.py's article extraction for why only one
+    # variant per family ever carries this).
+    article: str | None = None
+
 
 class ParsedVizajeFamily(BaseModel):
     external_id: str  # website product.id (family/grouping id)

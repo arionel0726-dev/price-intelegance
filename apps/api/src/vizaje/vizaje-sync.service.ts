@@ -612,6 +612,10 @@ export class VizajeSyncService {
       url: family.canonical_url,
       available: variant.available,
       barcode: canonicalBarcode,
+      // Display/reference only - never used for identity/dedup/matching
+      // (see the parser's article extraction for why only one variant per
+      // family ever has a non-null value here).
+      article: variant.article ?? null,
     };
 
     const [saved] = await this.database.db
@@ -633,6 +637,7 @@ export class VizajeSyncService {
           url: values.url,
           available: values.available,
           barcode: values.barcode,
+          article: values.article,
           updatedAt: new Date(),
         },
       })

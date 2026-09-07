@@ -6,6 +6,9 @@ export type ParsedVizajeVariant = {
   price: number | null;
   available: boolean;
   image_url: string | null;
+  // Display/reference only - see the parser's article extraction for why
+  // only one variant per family ever carries this.
+  article: string | null;
 };
 
 export type ParsedVizajeFamily = {

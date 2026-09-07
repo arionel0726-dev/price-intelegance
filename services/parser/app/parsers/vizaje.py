@@ -23,6 +23,20 @@ _TITLE_SUFFIX_RE = re.compile(r"\s*\|\s*Vizaje-Nica\s*$", re.IGNORECASE)
 # grouping code for that product's family (see _standalone_sku).
 _TRAILING_ID_RE = re.compile(r"/(\d+)/?$")
 
+_MAX_ARTICLE_LENGTH = 64
+
+
+def _clean_article(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+
+    value = raw.strip()
+
+    if not value or len(value) > _MAX_ARTICLE_LENGTH:
+        return None
+
+    return value
+
 
 def create_vizaje_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
@@ -105,11 +119,26 @@ class VizajeParser:
         canonical_url = self._extract_canonical_url(soup) or url
         parent_image = _first_image_url(product.get("images"))
         meta_fields = self._extract_meta_fields(soup)
+        article = _clean_article(meta_fields.get("Артикул"))
 
         if raw_variations:
             variants = [
                 self._build_variant(v, parent_image) for v in raw_variations
             ]
+
+            # The page's Артикул meta row is per-RENDER, not per-family: it
+            # always reflects variations[0] specifically (verified against
+            # live pages, including a case where the canonical URL's own
+            # trailing id pointed at a DIFFERENT variant than variations[0] -
+            # Артикул still matched variations[0], not the URL). The
+            # accompanying Штрих-код in that same meta row can belong to yet
+            # another variant (also verified live) - already why this parser
+            # never trusted that field either. So: attribute article to
+            # variations[0] only, since that's the one variant it's actually
+            # proven to describe; every sibling keeps article=None rather
+            # than risk mislabeling a different SKU with the wrong code.
+            if variants:
+                variants[0].article = article
         else:
             # Standalone family: the JSON has no variations[] entry, so
             # synthesize the single sellable SKU from the parent product
@@ -132,6 +161,9 @@ class VizajeParser:
                     ),
                     available=available,
                     image_url=parent_image,
+                    # Unambiguous here - only one sellable SKU exists, so the
+                    # page's Артикул can only describe this one variant.
+                    article=article,
                 )
             ]
 
@@ -191,12 +223,14 @@ class VizajeParser:
         return None
 
     # Reads the <dl class="product-meta"> key/value rows (Артикул, Штрих код,
-    # Пол, ...). Only "Пол" is currently used (family-level sex) - Артикул
-    # and Штрих код are intentionally NOT relied on here: they reflect
+    # Пол, ...). "Пол" is used as family-level sex. Артикул is used too, but
+    # ONLY attributed to variations[0] (see parse_product_page) - it reflects
     # whichever single variant the server happened to render for this
-    # specific URL, not the full variant set, and barcode enrichment for
-    # every variant is handled separately (via JobVN ID_nom lookup, not by
-    # scraping this row).
+    # specific URL, not the full variant set. Штрих код is still NOT relied
+    # on: verified live that it can belong to a DIFFERENT variant than the
+    # Артикул in the very same row (e.g. a 100ml Артикул paired with a 30ml
+    # barcode) - barcode enrichment for every variant stays on JobVN ID_nom
+    # lookup, never this row.
     def _extract_meta_fields(self, soup: BeautifulSoup) -> dict[str, str]:
         fields: dict[str, str] = {}
 
