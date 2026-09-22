@@ -1,7 +1,9 @@
 import Image from 'next/image'
 import Link from 'next/link'
 
+import { comparePrices } from '../lib/price-comparison'
 import type { ProductFamily } from '../types/product'
+import { PriceText } from './price-text'
 
 type ProductCardProps = {
 	product: ProductFamily
@@ -52,9 +54,11 @@ export function ProductCard({ product }: ProductCardProps) {
 
 					<div className="mt-4 flex items-center justify-between gap-3">
 						<p className="text-lg font-semibold tabular-nums">
-							{product.price
-								? `${product.priceVaries ? 'from ' : ''}${Number(product.price).toLocaleString('ro-MD')} MDL`
-								: '—'}
+							<PriceText
+								price={product.price}
+								prefix={product.priceVaries ? 'from ' : undefined}
+								state={comparePrices(product.price, product.competitorPrice)}
+							/>
 						</p>
 
 						<span className="text-xs font-medium text-muted-foreground underline-offset-4 group-hover:underline">

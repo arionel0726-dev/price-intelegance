@@ -1,6 +1,8 @@
 'use client'
 
 import { CatalogHeader } from '@/features/products/components/catalog-header'
+import { PriceText } from '@/features/products/components/price-text'
+import { comparePrices } from '@/features/products/lib/price-comparison'
 import { useProductDetails } from '@/features/products/queries/use-product-details'
 import { ArrowLeft, Barcode, Check, Copy, ExternalLink } from 'lucide-react'
 import Image from 'next/image'
@@ -39,6 +41,18 @@ export default function ProductDetailsPage() {
 
 	const { product, variantType, siblings, competitors } = data
 	const hasVariantSelector = siblings.length > 1
+
+	// Vizaje's headline price is compared against the cheapest competitor
+	// offer - the most meaningful single number when there are several
+	// (see price-comparison.ts; each competitor row below is compared
+	// against Vizaje's price individually, independent of this).
+	const competitorPrices = competitors
+		.map(item => item.price)
+		.filter((price): price is string => price !== null)
+	const cheapestCompetitorPrice =
+		competitorPrices.length > 0
+			? competitorPrices.reduce((min, price) => (Number(price) < Number(min) ? price : min))
+			: null
 
 	function goToVariant(variantId: number) {
 		if (variantId === product.id) return
@@ -84,9 +98,10 @@ export default function ProductDetailsPage() {
 						</h1>
 
 						<p className="mt-6 text-3xl font-semibold">
-							{product.price
-								? `${Number(product.price).toLocaleString('ro-MD')} MDL`
-								: '—'}
+							<PriceText
+								price={product.price}
+								state={comparePrices(product.price, cheapestCompetitorPrice)}
+							/>
 						</p>
 
 						{product.url && (
@@ -232,9 +247,10 @@ export default function ProductDetailsPage() {
 										</div>
 
 										<div className="text-2xl font-semibold tabular-nums">
-											{item.price
-												? `${Number(item.price).toLocaleString('ro-MD')} MDL`
-												: '—'}
+											<PriceText
+												price={item.price}
+												state={comparePrices(item.price, product.price)}
+											/>
 										</div>
 
 										<div>

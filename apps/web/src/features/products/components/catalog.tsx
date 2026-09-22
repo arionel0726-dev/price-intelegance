@@ -10,6 +10,8 @@ import { useProducts } from '../queries/use-products'
 import { CatalogToolbar } from './catalog-toolbar'
 import { Pagination } from './pagination'
 import { ProductCard } from './product-card'
+import { ProductListRow } from './product-list-row'
+import { type CatalogView, ViewToggle } from './view-toggle'
 
 const PAGE_SIZE = 40
 
@@ -18,6 +20,10 @@ export function Catalog() {
 	const [search, setSearch] = useState('')
 	const [brand, setBrand] = useState('all')
 	const [category, setCategory] = useState('all')
+	// Local UI-only state, not persisted - grid stays the default on every
+	// load, matching how search/brand/category already behave in this
+	// component (no existing pattern here for persisting display prefs).
+	const [view, setView] = useState<CatalogView>('grid')
 
 	const debouncedSearch = useDebouncedValue(search, 300)
 
@@ -84,23 +90,44 @@ export function Catalog() {
 						? 'Loading products...'
 						: `${pagination?.total ?? 0} products`}
 				</p>
+
+				<ViewToggle
+					view={view}
+					onViewChange={setView}
+				/>
 			</div>
 
 			{isLoading ? (
 				<CatalogSkeleton />
 			) : products.length > 0 ? (
-				<div
-					aria-busy={isPlaceholderData}
-					className={`mt-8 grid grid-cols-2 gap-x-5 gap-y-10 transition-opacity md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 ${
-						isPlaceholderData ? 'opacity-50' : ''
-					}`}
-				>
-					{products.map(product => (
-						<div key={product.id}>
-							<ProductCard product={product} />
-						</div>
-					))}
-				</div>
+				view === 'grid' ? (
+					<div
+						aria-busy={isPlaceholderData}
+						className={`mt-8 grid grid-cols-2 gap-x-5 gap-y-10 transition-opacity md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 ${
+							isPlaceholderData ? 'opacity-50' : ''
+						}`}
+					>
+						{products.map(product => (
+							<div key={product.id}>
+								<ProductCard product={product} />
+							</div>
+						))}
+					</div>
+				) : (
+					<div
+						aria-busy={isPlaceholderData}
+						className={`mt-8 flex flex-col gap-2 transition-opacity ${
+							isPlaceholderData ? 'opacity-50' : ''
+						}`}
+					>
+						{products.map(product => (
+							<ProductListRow
+								key={product.id}
+								product={product}
+							/>
+						))}
+					</div>
+				)
 			) : (
 				<div className="mt-5 border py-24 text-center">
 					<h2 className="font-medium">No products found</h2>

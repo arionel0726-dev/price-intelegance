@@ -22,6 +22,12 @@ export type ProductFamily = {
 	price: string | null
 	priceVaries: boolean
 
+	// Cheapest confirmed match belonging to the SAME SKU as `price` above
+	// (never a sibling's volume/shade), or null if that SKU has no match
+	// yet - feeds the card's price color (see lib/price-comparison.ts).
+	// Never used for grouping/identity.
+	competitorPrice: string | null
+
 	variantCount: number
 	// e.g. "4 volumes" / "8 shades" / "4 variants" - null for single-SKU families.
 	variantLabel: string | null

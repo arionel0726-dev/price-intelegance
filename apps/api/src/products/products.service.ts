@@ -176,7 +176,7 @@ export class ProductsService {
 
     const groupKeys = groupPage.map(row => row.groupKey);
 
-    const [representatives, aggregates] = await Promise.all([
+    const [representatives, aggregates, minPriceCompetitor] = await Promise.all([
       hasSearch
         ? // A search term matched specific SKUs within these families - use
           // the lowest matching id as the representative/link target (§15),
@@ -242,10 +242,41 @@ export class ProductsService {
         .from(products)
         .where(and(isNotNull(products.url), inArray(groupKeyExpr(), groupKeys)))
         .groupBy(groupKeyExpr()),
+      // Competitor price for the catalog card MUST come from the exact same
+      // SKU that `aggregate.minPrice` displays as `product.price` - never
+      // from a cheaper/pricier sibling's own match. (Real example that would
+      // otherwise mismatch: variant_group_id 304 - 30ml/1100 has no match,
+      // 50ml/1650 matches MAKEUP at 1535; comparing family minima would have
+      // shown 1100 vs 1535 as "favorable", when the 30ml SKU actually shown
+      // has no valid comparison at all.) DISTINCT ON picks the row that
+      // achieves MIN(price) per family (ties broken by lowest id, same
+      // convention as the representative-picking query above), then a
+      // correlated subquery scoped to `products.id = <that one row>` finds
+      // only that SKU's own cheapest confirmed match - never a sibling's.
+      // Bounded to this page's groupKeys, same as every other query here.
+      this.database.db
+        .selectDistinctOn([groupKeyExpr()], {
+          groupKey: groupKeyExpr(),
+          // Qualified as "products"."id" (not a bare interpolated column
+          // ref) - unqualified "id" here is ambiguous with matches.id once
+          // nested inside this correlated subquery's own FROM/JOIN scope.
+          competitorPrice: sql<string | null>`(
+            select min(cpv.price)
+            from matches m
+            inner join competitor_product_variants cpv on cpv.id = m.competitor_product_variant_id
+            where m.product_id = "products"."id"
+          )`,
+        })
+        .from(products)
+        .where(and(isNotNull(products.url), inArray(groupKeyExpr(), groupKeys)))
+        .orderBy(groupKeyExpr(), asc(products.price), asc(products.id)),
     ]);
 
     const representativeByGroupKey = new Map(representatives.map(row => [row.groupKey, row]));
     const aggregateByGroupKey = new Map(aggregates.map(row => [row.groupKey, row]));
+    const competitorPriceByGroupKey = new Map(
+      minPriceCompetitor.map(row => [row.groupKey, row.competitorPrice]),
+    );
 
     const items = groupPage
       .map(row => {
@@ -273,6 +304,11 @@ export class ProductsService {
           color: variantCount > 1 ? null : representative.color,
           price: aggregate.minPrice,
           priceVaries,
+          // Cheapest confirmed match belonging to the SAME SKU as `price`
+          // above (never a sibling's) - null if that specific SKU has no
+          // match yet. Drives the card's price color, never used for
+          // grouping/identity.
+          competitorPrice: competitorPriceByGroupKey.get(row.groupKey) ?? null,
           variantCount,
           variantLabel: buildVariantLabel(variantCount, variantType),
           createdAt: representative.createdAt,
