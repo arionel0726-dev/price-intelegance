@@ -8,6 +8,10 @@ from playwright.async_api import async_playwright
 from app.models import ParsedProduct, ParsedVariant
 from app.parsers.base import ProductParser
 
+# Same site-suffix-stripping convention already used for Vizaje's own
+# titles (see app/parsers/vizaje.py's _TITLE_SUFFIX_RE).
+_TITLE_SITE_SUFFIX_RE = re.compile(r"\s*\|\s*Makeup\.md\s*$", re.IGNORECASE)
+
 
 class MakeupParser(ProductParser):
     BASE_URL = "https://makeup.md"
@@ -66,12 +70,6 @@ class MakeupParser(ProductParser):
             timeout=20_000,
         )
 
-        title = (
-            await page.locator("h1")
-            .first
-            .inner_text()
-        ).strip()
-
         brand = await self._extract_brand_from_page(
             page
         )
@@ -90,6 +88,8 @@ class MakeupParser(ProductParser):
             html,
             "html.parser",
         )
+
+        title = self._extract_title(soup)
 
         return ParsedProduct(
             competitor="makeup",
@@ -153,6 +153,39 @@ class MakeupParser(ProductParser):
                 return match.group(1)
 
         return None
+
+    # og:title carries the FULL distinguishing product name. For some
+    # brands (Clinique, Estee Lauder, ...) the page's own <h1> collapses to
+    # a generic Russian category phrase ("Сыворотка для быстрого
+    # восстановления кожи") with the actual brand + product name only
+    # appearing in og:title. Confirmed live (2026-09-29) against that lossy
+    # case AND several already-correct ones (Lancome Idole, Versace
+    # Versense, MAC Skinfinish Colourstruck Blush): og:title is always a
+    # strict superset of the <h1> text in every product checked - either
+    # the same text plus a category label the matcher's concentration-token
+    # normalization already strips, or the same text plus the genuinely
+    # missing product name. Single deterministic meta tag, not free-text
+    # concatenation; <h1> stays as the fallback if the tag is ever absent.
+    def _extract_title(
+        self,
+        soup: BeautifulSoup,
+    ) -> str:
+        meta = soup.find(
+            "meta",
+            attrs={
+                "property": "og:title",
+            },
+        )
+
+        if meta:
+            content = meta.get("content")
+
+            if isinstance(content, str) and content.strip():
+                return _TITLE_SITE_SUFFIX_RE.sub("", content.strip()).strip()
+
+        heading = soup.find("h1")
+
+        return heading.get_text(strip=True) if heading else ""
 
     def _extract_image(
         self,

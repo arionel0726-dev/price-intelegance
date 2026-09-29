@@ -28,6 +28,10 @@ const BRAND_ALIASES: Record<string, string> = {
   'dolce and gabbana': 'dolce and gabbana',
   armani: 'giorgio armani',
   'giorgio armani': 'giorgio armani',
+  // Confirmed real case (2026-09-22 OVICO audit): Vizaje names this line
+  // "YSL Black Opium ..." - the abbreviation, not the full brand.
+  ysl: 'yves saint laurent',
+  'yves saint laurent': 'yves saint laurent',
 };
 
 function normalizeBrandKey(raw: string): string {
@@ -46,6 +50,25 @@ export function canonicalBrand(raw: string | null): string {
   if (!raw) return '';
   const key = normalizeBrandKey(raw);
   return BRAND_ALIASES[key] ?? key;
+}
+
+// Every normalized spelling of `raw`'s brand that canonicalBrand() would
+// treat as the same brand: its own cleaned text, plus any BRAND_ALIASES key
+// that maps to the same canonical value (e.g. brand "Yves Saint Laurent"
+// also yields "ysl"). Used by search-query-builder.ts to recognize a brand
+// mention embedded in the Vizaje product name under an abbreviation, not
+// just its full spelling - reuses this same alias table rather than
+// maintaining a second one.
+export function brandSpellings(raw: string): string[] {
+  const own = normalizeBrandKey(raw);
+  const canonical = canonicalBrand(raw);
+  const spellings = new Set<string>([own]);
+
+  for (const [key, value] of Object.entries(BRAND_ALIASES)) {
+    if (value === canonical) spellings.add(key);
+  }
+
+  return [...spellings].sort((a, b) => b.length - a.length);
 }
 
 // ---------------------------------------------------------------------------
@@ -94,9 +117,20 @@ export function extractConcentration(rawName: string | null): string | null {
 export function stripConcentrationTokens(rawName: string): string {
   let text = ` ${baseClean(rawName)} `;
 
-  for (const [token] of CONCENTRATION_TOKENS) {
-    text = text.split(` ${token} `).join(' ');
-  }
+  // Loop to a fixed point. A single pass can leave one adjacent duplicate
+  // token behind: for two identical tokens back to back (e.g. a competitor
+  // page title rendering "... Parfum parfum"), the first match's trailing
+  // space is also the second occurrence's leading space, so split()/join()
+  // only consumes one of them. Re-running until nothing changes removes
+  // any number of repeats, not just a single duplicate.
+  let previous: string;
+  do {
+    previous = text;
+
+    for (const [token] of CONCENTRATION_TOKENS) {
+      text = text.split(` ${token} `).join(' ');
+    }
+  } while (text !== previous);
 
   return text.trim();
 }
@@ -259,6 +293,29 @@ export function extractVizajeShadeCode(
   }
 
   return null;
+}
+
+// Fallback discriminator for shades with no numeric/alnum code at all -
+// just a name (e.g. "Babygirl", "Antique Velvet", "CB96" - the last one
+// starts with letters, not digits, so extractShadeCode's alnum pattern
+// doesn't catch it either). Deliberately mutually exclusive with
+// extractShadeCode (a code takes priority when one is found) and with
+// normalizeVolume (a volume string is never treated as a shade name) - a
+// raw label only becomes a "named shade" signal when it's neither. Compared
+// by exact normalized-text equality only, same conservative spirit as the
+// numeric codes: never attempts fuzzy/semantic shade matching (e.g.
+// "Coral Sunset" vs "Sunset Coral" stays unresolved, not force-matched).
+export function extractNamedShade(raw: string | null): string | null {
+  if (!raw) return null;
+
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  if (normalizeVolume(trimmed)) return null;
+  if (extractShadeCode(trimmed)) return null;
+
+  const normalized = normalizeName(trimmed);
+  return normalized || null;
 }
 
 // ---------------------------------------------------------------------------

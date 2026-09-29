@@ -64,6 +64,22 @@ export type OvicoTargetedSyncResult = {
   durationMs: number;
 };
 
+// One structured line per attempted product, logged at DEBUG level only -
+// the normal-path counterpart to the existing logger.warn() error logs.
+// Exists so a low-yield production run can be diagnosed from real logs
+// (see the discovery-quality investigation) instead of needing a one-off
+// script to reconstruct query -> search -> prefilter -> parse -> score.
+type OvicoDiscoveryDiagnostic = {
+  productId: number;
+  query: string | null;
+  rawResultCount: number;
+  rankedCount: number;
+  parsedCount: number;
+  decision: 'auto' | 'ambiguous' | 'noMatch' | 'error';
+  score: number | null;
+  rejectReason: string | null;
+};
+
 @Injectable()
 export class OvicoTargetedSyncService {
   private readonly logger = new Logger(OvicoTargetedSyncService.name);
@@ -90,25 +106,48 @@ export class OvicoTargetedSyncService {
     const autoMatches: OvicoTargetedAutoMatch[] = [];
 
     for (const vizaje of targets) {
+      // Structured per-product diagnostic trail (§2 of the discovery-
+      // quality investigation) - logged once per product via a single
+      // logger.debug() JSON line, never changing what the loop actually
+      // does. Populated incrementally as the product moves through the
+      // normal (non-error) path below.
+      const diag: OvicoDiscoveryDiagnostic = {
+        productId: vizaje.id,
+        query: null,
+        rawResultCount: 0,
+        rankedCount: 0,
+        parsedCount: 0,
+        decision: 'error',
+        score: null,
+        rejectReason: null,
+      };
+
       let ranked: (SearchResultItem & { prefilterSimilarity: number })[];
 
       try {
         const query = buildCompetitorSearchQuery(vizaje);
+        diag.query = query;
+
         const search = await requestSearch(this.parserUrl, '/search/ovico', query, 5);
         searchRequests += 1;
+        diag.rawResultCount = search.results.length;
 
         // Cheap pre-ranking BEFORE any product-page fetch - OVICO's own
         // search order is not reliable (see module comment), so this is the
         // signal that decides parse order, not the site's ranking.
         ranked = rankPlausibleCandidates(vizaje, search.results);
+        diag.rankedCount = ranked.length;
       } catch (error) {
         errors += 1;
         this.logger.warn(`search failed for vizaje id=${vizaje.id}: ${String(error)}`);
+        this.logDiagnostic(diag);
         continue;
       }
 
       if (ranked.length === 0) {
         noMatch += 1;
+        diag.decision = 'noMatch';
+        this.logDiagnostic(diag);
         continue;
       }
 
@@ -126,6 +165,7 @@ export class OvicoTargetedSyncService {
         }
 
         candidateParses += 1;
+        diag.parsedCount += 1;
 
         for (const variant of parsed.variants) {
           const result = scoreCandidate(vizaje, {
@@ -133,6 +173,14 @@ export class OvicoTargetedSyncService {
             variantLabel: variant.label,
             variantVolume: variant.volume,
           });
+
+          // Track the best-scoring candidate seen so far for the
+          // diagnostic, independent of the auto/ambiguous decision logic
+          // below - this is purely observational.
+          if (diag.score === null || result.score > diag.score) {
+            diag.score = result.score;
+            diag.rejectReason = result.rejectReason;
+          }
 
           if (result.decision === 'auto') {
             if (!bestAuto || result.score > bestAuto.result.score) {
@@ -152,10 +200,20 @@ export class OvicoTargetedSyncService {
       }
 
       if (!bestAuto) {
-        if (sawAmbiguous) ambiguous += 1;
-        else noMatch += 1;
+        if (sawAmbiguous) {
+          ambiguous += 1;
+          diag.decision = 'ambiguous';
+        } else {
+          noMatch += 1;
+          diag.decision = 'noMatch';
+        }
+        this.logDiagnostic(diag);
         continue;
       }
+
+      diag.decision = 'auto';
+      diag.score = bestAuto.result.score;
+      diag.rejectReason = null;
 
       try {
         const persisted = await this.persistence.persistProduct(competitor.id, bestAuto.parsed);
@@ -165,6 +223,8 @@ export class OvicoTargetedSyncService {
 
         if (!variantId) {
           errors += 1;
+          diag.decision = 'error';
+          this.logDiagnostic(diag);
           continue;
         }
 
@@ -188,9 +248,12 @@ export class OvicoTargetedSyncService {
           score: bestAuto.result.score,
           outcome,
         });
+        this.logDiagnostic(diag);
       } catch (error) {
         errors += 1;
+        diag.decision = 'error';
         this.logger.warn(`persist failed for vizaje id=${vizaje.id}: ${String(error)}`);
+        this.logDiagnostic(diag);
       }
     }
 
@@ -212,6 +275,10 @@ export class OvicoTargetedSyncService {
       autoMatches,
       durationMs: Date.now() - startedAt,
     };
+  }
+
+  private logDiagnostic(diag: OvicoDiscoveryDiagnostic): void {
+    this.logger.debug(JSON.stringify(diag));
   }
 
   private async loadTargets(options: OvicoTargetedSyncOptions): Promise<

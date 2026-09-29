@@ -1,6 +1,7 @@
 import {
   detectProductType,
   extractConcentration,
+  extractNamedShade,
   extractShadeCode,
   extractVizajeShadeCode,
   nameSimilarity,
@@ -93,13 +94,27 @@ export function scoreCandidate(
   const shadeExactMatch = shadeBothPresent && vizajeShade === competitorShade;
   const shadeConflict = shadeBothPresent && !shadeExactMatch;
 
+  // Named-shade fallback: only ever considered when neither side already
+  // produced a numeric/alnum shade code above (extractNamedShade itself
+  // stays out of that case - see matching-normalization.ts) - so a product
+  // never gets scored on both signals for the same variant.
+  const vizajeNamedShade = extractNamedShade(vizaje.color);
+  const competitorNamedShade = extractNamedShade(competitor.variantLabel);
+  const namedShadeBothPresent = Boolean(vizajeNamedShade && competitorNamedShade);
+  const namedShadeExactMatch = namedShadeBothPresent && vizajeNamedShade === competitorNamedShade;
+  // A wrong named shade must reject, never just fail to earn a bonus - same
+  // hard-conflict treatment as a wrong numeric shade code.
+  const namedShadeConflict = namedShadeBothPresent && !namedShadeExactMatch;
+
   const typeVizaje = detectProductType(vizaje.name);
   const typeCompetitor = detectProductType(competitor.title);
   const typeConflict = Boolean(
     typeVizaje && typeCompetitor && typeVizaje !== typeCompetitor,
   );
 
-  const isColorProduct = Boolean(vizajeShade || competitorShade);
+  const isColorProduct = Boolean(
+    vizajeShade || competitorShade || vizajeNamedShade || competitorNamedShade,
+  );
 
   const signals: MatchSignals = {
     brandMatched: true,
@@ -117,6 +132,10 @@ export function scoreCandidate(
     shadeCompetitor: competitorShade,
     shadeConflict,
     shadeExactMatch,
+    namedShadeVizaje: vizajeNamedShade,
+    namedShadeCompetitor: competitorNamedShade,
+    namedShadeConflict,
+    namedShadeExactMatch,
     typeVizaje,
     typeCompetitor,
     typeConflict,
@@ -132,6 +151,9 @@ export function scoreCandidate(
   if (shadeConflict) {
     return { nameSimilarity: 0, score: 0, decision: 'reject', rejectReason: 'shade_mismatch', signals };
   }
+  if (namedShadeConflict) {
+    return { nameSimilarity: 0, score: 0, decision: 'reject', rejectReason: 'shade_mismatch', signals };
+  }
   if (typeConflict) {
     return { nameSimilarity: 0, score: 0, decision: 'reject', rejectReason: 'type_conflict', signals };
   }
@@ -140,23 +162,28 @@ export function scoreCandidate(
 
   let score = Math.round(similarity * 100);
   if (volumeExactMatch) score += VOLUME_EXACT_BONUS;
-  if (shadeExactMatch) score += SHADE_EXACT_BONUS;
+  if (shadeExactMatch || namedShadeExactMatch) score += SHADE_EXACT_BONUS;
   if (concentrationAgree) score += CONCENTRATION_AGREE_BONUS;
   score = Math.min(100, Math.max(0, score));
 
   const noDiscriminatorEitherSide =
-    !vizajeVolume && !competitorVolume && !vizajeShade && !competitorShade;
+    !vizajeVolume &&
+    !competitorVolume &&
+    !vizajeShade &&
+    !competitorShade &&
+    !vizajeNamedShade &&
+    !competitorNamedShade;
 
   let eligibleForAuto = false;
   if (similarity >= AUTO_NAME_SIMILARITY_THRESHOLD) {
-    if (volumeExactMatch || shadeExactMatch) {
+    if (volumeExactMatch || shadeExactMatch || namedShadeExactMatch) {
       eligibleForAuto = true;
     } else if (noDiscriminatorEitherSide && similarity >= AUTO_NO_DISCRIMINATOR_THRESHOLD) {
       eligibleForAuto = true;
     }
   }
 
-  if (isColorProduct && !shadeExactMatch) {
+  if (isColorProduct && !shadeExactMatch && !namedShadeExactMatch) {
     eligibleForAuto = false;
   }
 

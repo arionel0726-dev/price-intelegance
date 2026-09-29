@@ -39,6 +39,10 @@ export type MatchSignals = {
   shadeCompetitor: string | null;
   shadeConflict: boolean;
   shadeExactMatch: boolean;
+  namedShadeVizaje: string | null;
+  namedShadeCompetitor: string | null;
+  namedShadeConflict: boolean;
+  namedShadeExactMatch: boolean;
   typeVizaje: string | null;
   typeCompetitor: string | null;
   typeConflict: boolean;
