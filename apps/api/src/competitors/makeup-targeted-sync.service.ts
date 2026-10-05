@@ -1,26 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import {
-  and,
-  competitorProductVariants,
-  competitorProducts,
-  competitors,
-  eq,
-  gt,
-  inArray,
-  isNotNull,
-  lte,
-  matches,
-  notInArray,
-  products,
-} from '@price/db';
-
 import { DatabaseService } from '../database/database.service';
 import { scoreCandidate, type ScoredCandidate } from '../matching/candidate-scoring';
 import { canonicalBrand } from '../matching/matching-normalization';
 import { MatchingService } from '../matching/matching.service';
 import { isPlausibleCandidate } from './candidate-prefilter';
 import { CompetitorPersistenceService } from './competitor-persistence.service';
-import { getRotationCursor, setRotationCursor } from './discovery-rotation';
+import { advanceRotationCursorPastProcessed, selectDiscoveryTargets, type DiscoveryFilters } from './discovery-targets';
 import {
   chunk,
   detectCooldownPattern,
@@ -54,6 +39,9 @@ const MAX_CANDIDATES_PARSED = 3;
 export type MakeupTargetedSyncOptions = {
   limit?: number;
   productIds?: number[];
+  brand?: string;
+  inStock?: boolean;
+  onlyUnmatched?: boolean;
 };
 
 export type MakeupTargetedAutoMatch = {
@@ -73,6 +61,8 @@ export type MakeupTargetedSyncResult = {
   status: 'completed' | 'stopped_early';
   stopReason: string | null;
 
+  filters: DiscoveryFilters;
+  eligibleProducts: number;
   productsAttempted: number;
   batches: number;
   batchSize: number;
@@ -115,7 +105,14 @@ export class MakeupTargetedSyncService {
   async sync(options: MakeupTargetedSyncOptions): Promise<MakeupTargetedSyncResult> {
     const startedAt = Date.now();
 
-    const targets = await this.loadTargets(options);
+    const selection = await selectDiscoveryTargets(
+      this.database,
+      MAKEUP_COMPETITOR.domain,
+      ROTATION_QUEUE_KEY,
+      20,
+      options,
+    );
+    const { targets } = selection;
     const competitor = await this.persistence.getOrCreateCompetitor(MAKEUP_COMPETITOR);
     const batches = chunk(targets, MAKEUP_DISCOVERY_BATCH_SIZE);
     const plannedTotal = targets.length;
@@ -362,20 +359,18 @@ export class MakeupTargetedSyncService {
 
     // Advance the rotation cursor only up to whatever was NOT deferred -
     // deferred products should be reconsidered by the next run, not skipped
-    // past, since they were never actually searched.
-    if (!options.productIds || options.productIds.length === 0) {
-      const deferredSet = new Set(deferredProductIds);
-      const actuallyProcessed = targets.filter(t => !deferredSet.has(t.id));
-
-      if (actuallyProcessed.length > 0) {
-        const maxProcessedId = Math.max(...actuallyProcessed.map(t => t.id));
-        setRotationCursor(ROTATION_QUEUE_KEY, maxProcessedId);
-      }
+    // past, since they were never actually searched. Only meaningful for the
+    // unfiltered routine queue (see selectDiscoveryTargets's usedRotation) -
+    // a filtered/random-selection run must not move this cursor.
+    if (selection.usedRotation) {
+      advanceRotationCursorPastProcessed(ROTATION_QUEUE_KEY, targets, deferredProductIds);
     }
 
     return {
       status: stopReason ? 'stopped_early' : 'completed',
       stopReason,
+      filters: selection.filters,
+      eligibleProducts: selection.eligibleProducts,
       productsAttempted: plannedTotal,
       batches: batches.length,
       batchSize: MAKEUP_DISCOVERY_BATCH_SIZE,
@@ -395,67 +390,5 @@ export class MakeupTargetedSyncService {
       autoMatches,
       durationMs: Date.now() - startedAt,
     };
-  }
-
-  private async loadTargets(options: MakeupTargetedSyncOptions): Promise<
-    { id: number; brand: string; name: string; volume: string | null; color: string | null }[]
-  > {
-    const base = this.database.db
-      .select({
-        id: products.id,
-        brand: products.brand,
-        name: products.name,
-        volume: products.volume,
-        color: products.color,
-      })
-      .from(products);
-
-    // Explicit productIds bypass the "not already matched" filter and the
-    // rotation cursor below - used for testing, idempotency checks, and
-    // deliberate re-discovery, not routine discovery.
-    if (options.productIds && options.productIds.length > 0) {
-      return base.where(
-        and(isNotNull(products.url), inArray(products.id, options.productIds)),
-      );
-    }
-
-    // Routine discovery queue: website-confirmed (products.url IS NOT NULL)
-    // AND no existing MAKEUP match yet - scoped to THIS competitor only, so
-    // a product already matched on OVICO (say) is still a valid MAKEUP
-    // discovery target. Already-matched-on-MAKEUP products only need
-    // REFRESH (a direct parse of their known URL), not another search.
-    // "Not recently attempted" is intentionally not tracked via schema yet
-    // (see project notes) - the rotation cursor below is the substitute:
-    // deterministic id-ascending rotation, wrapping around, so repeated
-    // runs don't keep re-selecting the same head of the table forever.
-    const alreadyMatchedOnMakeup = this.database.db
-      .select({ productId: matches.productId })
-      .from(matches)
-      .innerJoin(competitorProductVariants, eq(matches.competitorProductVariantId, competitorProductVariants.id))
-      .innerJoin(competitorProducts, eq(competitorProductVariants.competitorProductId, competitorProducts.id))
-      .innerJoin(competitors, eq(competitorProducts.competitorId, competitors.id))
-      .where(eq(competitors.domain, 'makeup.md'));
-
-    const limit = options.limit ?? 20;
-    const cursor = getRotationCursor(ROTATION_QUEUE_KEY);
-
-    const eligible = and(isNotNull(products.url), notInArray(products.id, alreadyMatchedOnMakeup));
-
-    const afterCursor = await base
-      .where(and(eligible, gt(products.id, cursor)))
-      .orderBy(products.id)
-      .limit(limit);
-
-    if (afterCursor.length >= limit) {
-      return afterCursor;
-    }
-
-    // Wrapped around - top up from the beginning of the table.
-    const wrapped = await base
-      .where(and(eligible, lte(products.id, cursor)))
-      .orderBy(products.id)
-      .limit(limit - afterCursor.length);
-
-    return [...afterCursor, ...wrapped];
   }
 }

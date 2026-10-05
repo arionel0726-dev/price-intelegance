@@ -3,8 +3,8 @@ import re
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
 
+from app.browser_pool import BrowserPool
 from app.models import ParsedProduct, ParsedVariant
 from app.parsers.base import ProductParser
 
@@ -16,33 +16,22 @@ _TITLE_SITE_SUFFIX_RE = re.compile(r"\s*\|\s*Makeup\.md\s*$", re.IGNORECASE)
 class MakeupParser(ProductParser):
     BASE_URL = "https://makeup.md"
 
+    # Uses the app-wide shared BrowserPool (one Chromium process for the
+    # service's lifetime) instead of launching its own - see
+    # app/browser_pool.py for why a fresh launch per call was leaking OS
+    # processes/threads in production.
+    def __init__(self, browser_pool: BrowserPool):
+        self._browser_pool = browser_pool
+
     async def parse_product(
         self,
         url: str,
     ) -> ParsedProduct:
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(
-                headless=True,
+        async with self._browser_pool.new_page() as page:
+            return await self.parse_product_page(
+                page,
+                url,
             )
-
-            context = await browser.new_context(
-                locale="ru-RU",
-                viewport={
-                    "width": 1440,
-                    "height": 1000,
-                },
-            )
-
-            page = await context.new_page()
-
-            try:
-                return await self.parse_product_page(
-                    page,
-                    url,
-                )
-            finally:
-                await context.close()
-                await browser.close()
 
 
     async def parse_product_page(

@@ -1,25 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import {
-  and,
-  competitorProductVariants,
-  competitorProducts,
-  competitors,
-  eq,
-  gt,
-  inArray,
-  isNotNull,
-  lte,
-  matches,
-  notInArray,
-  products,
-} from '@price/db';
-
 import { DatabaseService } from '../database/database.service';
 import { scoreCandidate, type ScoredCandidate } from '../matching/candidate-scoring';
 import { MatchingService } from '../matching/matching.service';
 import { rankPlausibleCandidates } from './candidate-prefilter';
 import { CompetitorPersistenceService } from './competitor-persistence.service';
-import { getRotationCursor, setRotationCursor } from './discovery-rotation';
+import { advanceRotationCursorPastProcessed, selectDiscoveryTargets, type DiscoveryFilters } from './discovery-targets';
 import { requestParsedProduct, requestSearch } from './parser-client';
 import type { ParsedProduct, ParsedVariant, SearchResultItem } from './parser-client.types';
 import { buildCompetitorSearchQuery } from './search-query-builder';
@@ -37,6 +22,9 @@ const MAX_CANDIDATES_PARSED = 2;
 export type OvicoTargetedSyncOptions = {
   limit?: number;
   productIds?: number[];
+  brand?: string;
+  inStock?: boolean;
+  onlyUnmatched?: boolean;
 };
 
 export type OvicoTargetedAutoMatch = {
@@ -53,6 +41,8 @@ export type OvicoTargetedAutoMatch = {
 };
 
 export type OvicoTargetedSyncResult = {
+  filters: DiscoveryFilters;
+  eligibleProducts: number;
   productsAttempted: number;
   searchRequests: number;
   candidateParses: number;
@@ -94,7 +84,14 @@ export class OvicoTargetedSyncService {
   async sync(options: OvicoTargetedSyncOptions): Promise<OvicoTargetedSyncResult> {
     const startedAt = Date.now();
 
-    const targets = await this.loadTargets(options);
+    const selection = await selectDiscoveryTargets(
+      this.database,
+      OVICO_COMPETITOR.domain,
+      ROTATION_QUEUE_KEY,
+      5,
+      options,
+    );
+    const { targets } = selection;
     const competitor = await this.persistence.getOrCreateCompetitor(OVICO_COMPETITOR);
 
     let searchRequests = 0;
@@ -257,14 +254,13 @@ export class OvicoTargetedSyncService {
       }
     }
 
-    if (!options.productIds || options.productIds.length === 0) {
-      if (targets.length > 0) {
-        const maxId = Math.max(...targets.map(t => t.id));
-        setRotationCursor(ROTATION_QUEUE_KEY, maxId);
-      }
+    if (selection.usedRotation) {
+      advanceRotationCursorPastProcessed(ROTATION_QUEUE_KEY, targets, []);
     }
 
     return {
+      filters: selection.filters,
+      eligibleProducts: selection.eligibleProducts,
       productsAttempted: targets.length,
       searchRequests,
       candidateParses,
@@ -279,58 +275,5 @@ export class OvicoTargetedSyncService {
 
   private logDiagnostic(diag: OvicoDiscoveryDiagnostic): void {
     this.logger.debug(JSON.stringify(diag));
-  }
-
-  private async loadTargets(options: OvicoTargetedSyncOptions): Promise<
-    { id: number; brand: string; name: string; volume: string | null; color: string | null }[]
-  > {
-    const base = this.database.db
-      .select({
-        id: products.id,
-        brand: products.brand,
-        name: products.name,
-        volume: products.volume,
-        color: products.color,
-      })
-      .from(products);
-
-    // Explicit productIds bypass the "not already matched" filter and the
-    // rotation cursor below - see makeup-targeted-sync.service.ts for the
-    // same pattern and reasoning.
-    if (options.productIds && options.productIds.length > 0) {
-      return base.where(
-        and(isNotNull(products.url), inArray(products.id, options.productIds)),
-      );
-    }
-
-    // Scoped to OVICO specifically - a product already matched on MAKEUP is
-    // still a valid OVICO discovery target.
-    const alreadyMatchedOnOvico = this.database.db
-      .select({ productId: matches.productId })
-      .from(matches)
-      .innerJoin(competitorProductVariants, eq(matches.competitorProductVariantId, competitorProductVariants.id))
-      .innerJoin(competitorProducts, eq(competitorProductVariants.competitorProductId, competitorProducts.id))
-      .innerJoin(competitors, eq(competitorProducts.competitorId, competitors.id))
-      .where(eq(competitors.domain, 'ovico.md'));
-
-    const limit = options.limit ?? 5;
-    const cursor = getRotationCursor(ROTATION_QUEUE_KEY);
-    const eligible = and(isNotNull(products.url), notInArray(products.id, alreadyMatchedOnOvico));
-
-    const afterCursor = await base
-      .where(and(eligible, gt(products.id, cursor)))
-      .orderBy(products.id)
-      .limit(limit);
-
-    if (afterCursor.length >= limit) {
-      return afterCursor;
-    }
-
-    const wrapped = await base
-      .where(and(eligible, lte(products.id, cursor)))
-      .orderBy(products.id)
-      .limit(limit - afterCursor.length);
-
-    return [...afterCursor, ...wrapped];
   }
 }

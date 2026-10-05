@@ -15,10 +15,13 @@ import { VizajeMasterSyncJob } from '../src/jobs/vizaje-master-sync.job';
 //
 // Usage (from apps/api):
 //   bun run scripts/run-job.ts vizaje
-//   bun run scripts/run-job.ts makeup-discovery [limit]
+//   bun run scripts/run-job.ts makeup-discovery [limit] [--brand="Clarins"] [--in-stock] [--only-unmatched]
 //   bun run scripts/run-job.ts makeup-refresh
-//   bun run scripts/run-job.ts ovico-discovery [limit]
+//   bun run scripts/run-job.ts ovico-discovery [limit] [--brand="Clarins"] [--in-stock] [--only-unmatched]
 //   bun run scripts/run-job.ts ovico-refresh
+//
+// The three discovery flags are only meaningful for makeup-discovery /
+// ovico-discovery - see discovery-targets.ts for what each one selects.
 
 const JOB_NAMES = [
   'vizaje',
@@ -30,15 +33,55 @@ const JOB_NAMES = [
 
 type JobName = (typeof JOB_NAMES)[number];
 
+type DiscoveryCliArgs = {
+  limit?: number;
+  brand?: string;
+  inStock: boolean;
+  onlyUnmatched?: boolean;
+};
+
+// Deliberately permissive about flag position - the required CLI examples
+// put the positional limit first and flags after, but there's no reason to
+// enforce that ordering.
+function parseDiscoveryArgs(rest: string[]): DiscoveryCliArgs {
+  const result: DiscoveryCliArgs = { inStock: false };
+
+  for (const arg of rest) {
+    if (arg === '--in-stock') {
+      result.inStock = true;
+      continue;
+    }
+
+    if (arg === '--only-unmatched') {
+      result.onlyUnmatched = true;
+      continue;
+    }
+
+    const brandMatch = arg.match(/^--brand=(.*)$/);
+    if (brandMatch) {
+      result.brand = brandMatch[1].replace(/^["']|["']$/g, '');
+      continue;
+    }
+
+    if (/^\d+$/.test(arg) && result.limit === undefined) {
+      result.limit = Number(arg);
+      continue;
+    }
+
+    throw new Error(`Unrecognized argument: ${arg}`);
+  }
+
+  return result;
+}
+
 async function main() {
-  const [jobArg, limitArg] = process.argv.slice(2);
+  const [jobArg, ...rest] = process.argv.slice(2);
 
   if (!jobArg || !JOB_NAMES.includes(jobArg as JobName)) {
-    throw new Error(`Usage: run-job.ts <${JOB_NAMES.join('|')}> [limit]`);
+    throw new Error(`Usage: run-job.ts <${JOB_NAMES.join('|')}> [limit] [--brand="..."] [--in-stock] [--only-unmatched]`);
   }
 
   const job = jobArg as JobName;
-  const limit = limitArg ? Number(limitArg) : undefined;
 
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: ['log', 'warn', 'error'],
@@ -51,19 +94,19 @@ async function main() {
       case 'vizaje':
         result = await app.get(VizajeMasterSyncJob).run();
         break;
-      case 'makeup-discovery':
-        result = limit !== undefined
-          ? await app.get(MakeupDiscoveryJob).run(limit)
-          : await app.get(MakeupDiscoveryJob).run();
+      case 'makeup-discovery': {
+        const { limit, brand, inStock, onlyUnmatched } = parseDiscoveryArgs(rest);
+        result = await app.get(MakeupDiscoveryJob).run({ limit, brand, inStock, onlyUnmatched });
         break;
+      }
       case 'makeup-refresh':
         result = await app.get(MakeupRefreshJob).run();
         break;
-      case 'ovico-discovery':
-        result = limit !== undefined
-          ? await app.get(OvicoDiscoveryJob).run(limit)
-          : await app.get(OvicoDiscoveryJob).run();
+      case 'ovico-discovery': {
+        const { limit, brand, inStock, onlyUnmatched } = parseDiscoveryArgs(rest);
+        result = await app.get(OvicoDiscoveryJob).run({ limit, brand, inStock, onlyUnmatched });
         break;
+      }
       case 'ovico-refresh':
         result = await app.get(OvicoRefreshJob).run();
         break;

@@ -15,7 +15,14 @@ const config: Config = {
   rootDir: '.',
   testRegex: '.*\\.spec\\.ts$',
   transform: {
-    '^.+\\.(t|j)s$': 'ts-jest',
+    // ts-jest compiles one file at a time, which makes TypeScript infer the
+    // "common source directory" as that file's own folder - with
+    // `declaration: true` (tsconfig.json) that mismatch is a hard error
+    // (TS5011) for every spec in the repo, pre-existing and unrelated to any
+    // particular test. `nest build` doesn't hit this because it compiles via
+    // tsconfig.build.json, which already sets rootDir explicitly - mirroring
+    // that here fixes it for ts-jest too.
+    '^.+\\.(t|j)s$': ['ts-jest', { tsconfig: { rootDir: './src' } }],
   },
   moduleNameMapper: pathsToModuleNameMapper(paths, { prefix: '<rootDir>/' }),
   collectCoverageFrom: [

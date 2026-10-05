@@ -1,3 +1,4 @@
+from app.browser_pool import BrowserPool
 from app.models import SearchResponse, SearchResultItem
 
 # Candidate discovery only - NOT a full product parser. Finds a small set of
@@ -19,11 +20,18 @@ class MakeupSearcher:
     # parser's use of Playwright.
     SEARCH_API_PATH = "/shop/v1/search/products/"
 
+    # Uses the app-wide shared BrowserPool (one Chromium process for the
+    # service's lifetime) instead of launching its own - see
+    # app/browser_pool.py for why a fresh launch per call was leaking OS
+    # processes/threads in production.
+    def __init__(self, browser_pool: BrowserPool):
+        self._browser_pool = browser_pool
+
     async def search(self, query: str, limit: int = 5) -> SearchResponse:
         results = await self.search_batch([query], limit)
         return results[0]
 
-    # Reuses ONE browser session (one WAF-cleared context) across every
+    # Reuses ONE browser context (one WAF-cleared session) across every
     # query, instead of launching a fresh browser per search. Added after a
     # real controlled-sync run showed the naive one-browser-per-search
     # version failing ~65% of searches under moderate volume (empty-body
@@ -31,43 +39,28 @@ class MakeupSearcher:
     # sessions" from the same IP in quick succession reads as bot-like to
     # the WAF. One session issuing many in-page fetch() calls does not.
     async def search_batch(self, queries: list[str], limit: int = 5) -> list[SearchResponse]:
-        from playwright.async_api import async_playwright
-
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
-
-            context = await browser.new_context(
-                locale="ru-RU",
-                viewport={"width": 1440, "height": 1000},
+        async with self._browser_pool.new_page() as page:
+            # One page load establishes the WAF session cookie for the
+            # whole batch - the search API alone, with no prior
+            # navigation, still gets challenged even from a real browser.
+            await page.goto(
+                f"{self.BASE_URL}/",
+                wait_until="domcontentloaded",
+                timeout=30_000,
             )
 
-            page = await context.new_page()
+            results: list[SearchResponse] = []
 
-            try:
-                # One page load establishes the WAF session cookie for the
-                # whole batch - the search API alone, with no prior
-                # navigation, still gets challenged even from a real browser.
-                await page.goto(
-                    f"{self.BASE_URL}/",
-                    wait_until="domcontentloaded",
-                    timeout=30_000,
-                )
+            for query in queries:
+                try:
+                    results.append(await self._search_in_page(page, query, limit))
+                except Exception:
+                    # One bad query (a transient site hiccup, a single
+                    # unlucky WAF re-challenge) must not lose every other
+                    # result already gathered in this batch.
+                    results.append(SearchResponse(query=query, results=[]))
 
-                results: list[SearchResponse] = []
-
-                for query in queries:
-                    try:
-                        results.append(await self._search_in_page(page, query, limit))
-                    except Exception:
-                        # One bad query (a transient site hiccup, a single
-                        # unlucky WAF re-challenge) must not lose every other
-                        # result already gathered in this batch.
-                        results.append(SearchResponse(query=query, results=[]))
-
-                return results
-            finally:
-                await context.close()
-                await browser.close()
+            return results
 
     async def _search_in_page(self, page, query: str, limit: int) -> SearchResponse:
         api_url = f"{self.BASE_URL}{self.SEARCH_API_PATH}?query={query}&offset=0"

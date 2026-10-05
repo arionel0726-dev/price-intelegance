@@ -1,7 +1,10 @@
+import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
-from playwright.async_api import async_playwright
 from pydantic import BaseModel
 
+from app.browser_pool import BrowserPool
 from app.crawlers.makeup import MakeupCrawler
 from app.crawlers.ovico import OvicoCrawler
 from app.crawlers.vizaje import VizajeCrawler
@@ -25,20 +28,36 @@ from app.parsers.vizaje import VizajeParser
 from app.searchers.makeup import MakeupSearcher
 from app.searchers.ovico import OvicoSearcher
 
+# One Chromium process for the whole service lifetime - see
+# app/browser_pool.py for the production incident this fixes. 2 is the
+# conservative default the investigation asked for; override via env if
+# ever proven too low.
+browser_pool = BrowserPool(max_concurrency=int(os.environ.get("MAKEUP_BROWSER_CONCURRENCY", "2")))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await browser_pool.start()
+    try:
+        yield
+    finally:
+        await browser_pool.stop()
+
 
 app = FastAPI(
     title="Price Parser",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 
-makeup_parser = MakeupParser()
+makeup_parser = MakeupParser(browser_pool)
 makeup_crawler = MakeupCrawler()
 ovico_parser = OvicoParser()
 ovico_crawler = OvicoCrawler()
 vizaje_parser = VizajeParser()
 vizaje_crawler = VizajeCrawler()
-makeup_searcher = MakeupSearcher()
+makeup_searcher = MakeupSearcher(browser_pool)
 ovico_searcher = OvicoSearcher()
 
 
@@ -92,6 +111,7 @@ class SearchBatchRequest(BaseModel):
 async def health():
     return {
         "status": "ok",
+        "browser_pool": browser_pool.diagnostics(),
     }
 
 
@@ -141,29 +161,12 @@ async def crawl_makeup(
     payload: CrawlMakeupRequest,
 ):
     try:
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(
-                headless=True,
-            )
-
-            context = await browser.new_context(
-                locale="ru-RU",
-                viewport={
-                    "width": 1440,
-                    "height": 1000,
-                },
-            )
-
-            page = await context.new_page()
-
+        async with browser_pool.new_page() as page:
             products = await makeup_crawler.crawl_category(
                 page,
                 payload.url,
                 max_products=payload.max_products,
             )
-
-            await context.close()
-            await browser.close()
 
         return CrawlResult(
             competitor="makeup",
@@ -186,34 +189,17 @@ async def parse_makeup_batch(
     payload: BatchParseMakeupRequest,
 ):
     try:
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(
-                headless=True,
-            )
-
-            context = await browser.new_context(
-                locale="ru-RU",
-                viewport={
-                    "width": 1440,
-                    "height": 1000,
-                },
-            )
-
-            crawl_page = await context.new_page()
-
+        async with browser_pool.new_page() as crawl_page:
             refs = await makeup_crawler.crawl_category(
                 crawl_page,
                 payload.url,
                 max_products=payload.max_products,
             )
 
-            await crawl_page.close()
+        products: list[ParsedProduct] = []
+        failures: list[BatchParseFailure] = []
 
-            products: list[ParsedProduct] = []
-            failures: list[BatchParseFailure] = []
-
-            parse_page = await context.new_page()
-
+        async with browser_pool.new_page() as parse_page:
             for ref in refs:
                 try:
                     product = await makeup_parser.parse_product_page(
@@ -231,10 +217,6 @@ async def parse_makeup_batch(
                             error=str(error),
                         )
                     )
-
-            await parse_page.close()
-            await context.close()
-            await browser.close()
 
         return BatchParseResult(
             competitor="makeup",

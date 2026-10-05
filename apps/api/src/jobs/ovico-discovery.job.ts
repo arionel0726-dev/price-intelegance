@@ -18,6 +18,13 @@ const JOB_NAME = 'ovico-discovery';
 // lock with OvicoRefreshJob.
 const DEFAULT_LIMIT = Number(process.env.OVICO_DISCOVERY_RUN_LIMIT ?? 15);
 
+export type OvicoDiscoveryJobOptions = {
+  limit?: number;
+  brand?: string;
+  inStock?: boolean;
+  onlyUnmatched?: boolean;
+};
+
 @Injectable()
 export class OvicoDiscoveryJob {
   private readonly logger = new Logger(OvicoDiscoveryJob.name);
@@ -39,17 +46,29 @@ export class OvicoDiscoveryJob {
     await this.run();
   }
 
+  // Accepts either a bare limit (legacy call shape - still used by
+  // scripts/lock-test.ts) or an options object carrying the optional
+  // brand/in-stock/only-unmatched filters - see MakeupDiscoveryJob.run for
+  // the same pattern and reasoning.
   async run(
-    limit: number = DEFAULT_LIMIT,
+    limitOrOptions: number | OvicoDiscoveryJobOptions = DEFAULT_LIMIT,
   ): Promise<JobRunEnvelope<Awaited<ReturnType<OvicoTargetedSyncService['sync']>>>> {
     const startedAt = new Date();
+    const options: OvicoDiscoveryJobOptions =
+      typeof limitOrOptions === 'number' ? { limit: limitOrOptions } : limitOrOptions;
+    const limit = options.limit ?? DEFAULT_LIMIT;
 
     if (!this.lock.tryAcquire('ovico', JOB_NAME)) {
       return buildEnvelope<Awaited<ReturnType<OvicoTargetedSyncService['sync']>>>(this.logger, JOB_NAME, startedAt, 'skipped_locked', 'lock_held', null);
     }
 
     try {
-      const detail = await this.ovicoTargetedSync.sync({ limit });
+      const detail = await this.ovicoTargetedSync.sync({
+        limit,
+        brand: options.brand,
+        inStock: options.inStock,
+        onlyUnmatched: options.onlyUnmatched,
+      });
       return buildEnvelope(this.logger, JOB_NAME, startedAt, 'success', undefined, detail);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
