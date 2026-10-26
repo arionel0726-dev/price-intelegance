@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { BadGatewayException, Injectable, Logger } from '@nestjs/common';
-import { eq, matches, products, productBarcodes } from '@price/db';
+import { brands, eq, matches, products, productBarcodes } from '@price/db';
 
 import { DatabaseService } from '../database/database.service';
 import {
@@ -146,6 +146,8 @@ export class VizajeSyncService {
   async sync(maxProducts: number | undefined): Promise<VizajeSyncResult> {
     const batch = await this.requestBatch(maxProducts);
 
+    await this.ensureBrandsExist(batch.families);
+
     const { entries, crossFamilyCollisions } = this.detectCrossFamilyCollisions(
       batch.families,
     );
@@ -223,6 +225,8 @@ export class VizajeSyncService {
       `Phase 1 after retries: parsed=${allFamilies.length} permanently failed=${finalFailures.length}`,
     );
 
+    await this.ensureBrandsExist(allFamilies);
+
     const rawVariationEntries = allFamilies.reduce(
       (sum, family) => sum + family.variants.length,
       0,
@@ -290,6 +294,40 @@ export class VizajeSyncService {
       legacyOnlyAudit,
       durationMs: Date.now() - startedAt,
     };
+  }
+
+  // Brand bootstrap for Admin policy (Price Intelligence milestone 1) -
+  // every canonical brand (canonicalBrand() output) encountered in a batch
+  // gets a row with all-enabled defaults via ON CONFLICT DO NOTHING, so an
+  // already-configured brand's policy is never touched by a sync. Computed
+  // once per sync() / fullSync() call over the whole batch (not per SKU) -
+  // ~100 distinct brands total, so this is one small batch insert, not one
+  // query per product. canonicalBrand() output is treated as a persisted
+  // identifier (see policy-precedence.ts) - a future normalization change
+  // that alters what a brand canonicalizes to requires an explicit
+  // migration/reconciliation of existing `brands` rows, not just picked up
+  // silently here.
+  private async ensureBrandsExist(families: ParsedVizajeFamily[]): Promise<void> {
+    const displayNameByCanonicalKey = new Map<string, string>();
+
+    for (const family of families) {
+      if (!family.brand) continue;
+      const key = canonicalBrand(family.brand);
+      if (!key || displayNameByCanonicalKey.has(key)) continue;
+      displayNameByCanonicalKey.set(key, family.brand);
+    }
+
+    if (displayNameByCanonicalKey.size === 0) return;
+
+    await this.database.db
+      .insert(brands)
+      .values(
+        [...displayNameByCanonicalKey.entries()].map(([canonicalKey, displayName]) => ({
+          canonicalKey,
+          displayName,
+        })),
+      )
+      .onConflictDoNothing({ target: brands.canonicalKey });
   }
 
   // Small, conservative retry policy for families that failed on the single

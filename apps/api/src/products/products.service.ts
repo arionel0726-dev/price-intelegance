@@ -12,15 +12,21 @@ import {
   ilike,
   inArray,
   isNotNull,
+  knownPlaceholderImages,
   matches,
+  not,
+  notInArray,
   or,
   productBarcodes,
+  productPolicyOverrides,
   products,
   sql,
   type SQL,
 } from '@price/db';
 
 import { DatabaseService } from '../database/database.service';
+import { canonicalBrand } from '../matching/matching-normalization';
+import { PolicyService } from '../policy/policy.service';
 import {
   CATEGORY_GROUPS,
   CATEGORY_GROUP_LABELS,
@@ -33,6 +39,13 @@ const MAX_PAGE_SIZE = 100;
 export type ProductsListQuery = {
   page?: number;
   limit?: number;
+  // Admin/Data Quality escape hatch - false (default) hides missing/
+  // placeholder-image products and policy-hidden brands/products from the
+  // ordinary catalog listing; true lifts both so a future Data Quality
+  // screen can see everything. Never changes discovery/price-monitoring
+  // eligibility - those never consult this flag or the image/visibility
+  // state at all.
+  includeHidden?: boolean;
   search?: string;
   brand?: string;
   category?: string;
@@ -113,7 +126,10 @@ function groupKeyExpr() {
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly database: DatabaseService) {}
+  constructor(
+    private readonly database: DatabaseService,
+    private readonly policy: PolicyService,
+  ) {}
 
   // Catalog list, grouped into "variant families" (see groupKeyExpr) so
   // sibling Vizaje SKUs (volume/shade ladders sharing one
@@ -127,7 +143,15 @@ export class ProductsService {
     const offset = (page - 1) * limit;
 
     const hasSearch = Boolean(query.search?.trim());
-    const skuWhere = this.buildWhere(query);
+    // Brand visibility needs canonicalBrand()'s alias table, which isn't a
+    // plain SQL predicate (same limitation as the brand TEXT filter below
+    // and the discovery brand-policy gate in discovery-targets.ts) - so the
+    // set of raw brand spellings a hidden canonical brand maps to is
+    // resolved once per request, then pushed into buildWhere as a plain
+    // SQL `NOT IN`. ~100 distinct brands total, so this is one small extra
+    // query, not a per-row cost.
+    const hiddenRawBrands = query.includeHidden ? [] : await this.resolveHiddenRawBrands();
+    const skuWhere = this.buildWhere(query, hiddenRawBrands);
 
     const [totals, groupPage] = await Promise.all([
       this.database.db
@@ -449,8 +473,85 @@ export class ProductsService {
   // than one barcode. Operates at SKU level - findAll() groups the matching
   // rows into families afterward, so a search hit on any one sibling still
   // surfaces its whole family (§15).
-  private buildWhere(query: ProductsListQuery): SQL | undefined {
+  // Raw products.brand spellings whose canonical brand is catalog-hidden -
+  // see the comment in findAll(). Small (~100 distinct brands) and run
+  // once per catalog request, same cost class as the existing getFilters()
+  // distinct-brand query.
+  private async resolveHiddenRawBrands(): Promise<string[]> {
+    const hiddenKeys = await this.policy.loadHiddenCanonicalBrandKeys();
+    if (hiddenKeys.size === 0) return [];
+
+    const distinctBrands = await this.database.db.selectDistinct({ brand: products.brand }).from(products);
+    return distinctBrands.map(row => row.brand).filter(brand => hiddenKeys.has(canonicalBrand(brand)));
+  }
+
+  private buildWhere(query: ProductsListQuery, hiddenRawBrands: string[]): SQL | undefined {
     const conditions: SQL[] = [isNotNull(products.url)];
+
+    if (!query.includeHidden) {
+      // Image status: hide missing (NULL) and confirmed-placeholder images
+      // by default - a non-null imageUrl alone is NOT sufficient (see
+      // known_placeholder_images / project notes). Never excludes a product
+      // from discovery/price monitoring - those tables are never consulted
+      // outside this catalog-listing query.
+      //
+      // isNotNull is REQUIRED as its own condition, not implied by the
+      // notInArray below: SQL's `x NOT IN (subquery)` is vacuously TRUE for
+      // x = NULL whenever the subquery itself returns zero rows (an empty
+      // `IN` list is unconditionally false, so its negation is true) - so
+      // on a fresh deployment, before any placeholder URL is ever
+      // confirmed into known_placeholder_images, a missing-image product
+      // would otherwise NOT be hidden at all until the first placeholder is
+      // registered. Asserting isNotNull directly avoids depending on that
+      // three-valued-logic edge case.
+      conditions.push(isNotNull(products.imageUrl));
+      conditions.push(
+        notInArray(
+          products.imageUrl,
+          this.database.db.select({ imageUrl: knownPlaceholderImages.imageUrl }).from(knownPlaceholderImages),
+        ),
+      );
+
+      // Catalog visibility: product override (tri-state) > brand policy >
+      // default true. Expressed as "not explicitly force-hidden by a
+      // product override" AND ("explicitly force-shown by a product
+      // override" OR "the brand doesn't hide it") - see
+      // policy-precedence.ts for the same precedence computed in JS for
+      // discovery/refresh, where a SQL predicate isn't needed because
+      // those operate over an already-loaded set rather than a paginated
+      // query.
+      conditions.push(
+        not(
+          exists(
+            this.database.db
+              .select({ id: productPolicyOverrides.productId })
+              .from(productPolicyOverrides)
+              .where(
+                and(
+                  eq(productPolicyOverrides.productId, products.id),
+                  eq(productPolicyOverrides.catalogEnabledOverride, false),
+                ),
+              ),
+          ),
+        ),
+      );
+      conditions.push(
+        or(
+          exists(
+            this.database.db
+              .select({ id: productPolicyOverrides.productId })
+              .from(productPolicyOverrides)
+              .where(
+                and(
+                  eq(productPolicyOverrides.productId, products.id),
+                  eq(productPolicyOverrides.catalogEnabledOverride, true),
+                ),
+              ),
+          ),
+          hiddenRawBrands.length > 0 ? notInArray(products.brand, hiddenRawBrands) : sql`true`,
+        )!,
+      );
+    }
 
     if (query.brand) {
       conditions.push(eq(products.brand, query.brand));

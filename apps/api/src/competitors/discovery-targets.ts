@@ -4,18 +4,25 @@ import {
   competitorProducts,
   competitors,
   count,
+  discoveryAttempts,
   eq,
+  exists,
   gt,
   inArray,
   isNotNull,
   lte,
   matches,
+  not,
   notInArray,
+  or,
   products,
+  sql,
 } from '@price/db';
 
 import { DatabaseService } from '../database/database.service';
 import { canonicalBrand } from '../matching/matching-normalization';
+import type { CompetitorDomain } from '../policy/policy-precedence';
+import { loadPolicyContext } from '../policy/policy.service';
 import { getRotationCursor, setRotationCursor } from './discovery-rotation';
 
 export type DiscoveryTarget = {
@@ -55,6 +62,16 @@ export type DiscoveryTargetSelection = {
   // queue specifically, not a general "already tried" marker, so a
   // one-off filtered/random run must not move it.
   usedRotation: boolean;
+  // The full SQL-eligible cursor window BEFORE the brand/product discovery
+  // policy JS filter is applied - only meaningful when usedRotation is
+  // true. Pass THIS (not `targets`) to advanceRotationCursorPastProcessed,
+  // together with whatever the caller separately defers for transient
+  // reasons (cooldown/search errors). A policy-excluded product is not a
+  // transient defer - the rotation cursor must still advance past it (it
+  // will become reachable again on the next full wrap-around if an admin
+  // re-enables its brand), or a long run of policy-disabled products would
+  // otherwise permanently wedge the cursor just before them.
+  rotationWindow: DiscoveryTarget[];
 };
 
 // Case-insensitive, exact normalized brand comparison - deliberately reuses
@@ -82,18 +99,55 @@ export function randomSample<T>(pool: readonly T[], limit: number): T[] {
   return shuffled.slice(0, limit);
 }
 
+// Excludes a product from the SQL-eligible set while it is pending_review
+// (awaiting a future AI/manual review - must never be reselected) or while
+// a no_match/error outcome's retry backoff hasn't elapsed yet. Joined via
+// competitors.domain (not a resolved id) to mirror the existing
+// `alreadyMatchedOnCompetitor` subquery's shape - if the competitor row
+// doesn't exist yet (never synced), this simply matches nothing, same as
+// that subquery. "processing" is deliberately not referenced here - this
+// milestone never persists that status (see discovery-state.service.ts).
+function blockedByDiscoveryAttempt(database: DatabaseService, competitorDomain: CompetitorDomain) {
+  return exists(
+    database.db
+      .select({ id: discoveryAttempts.id })
+      .from(discoveryAttempts)
+      .innerJoin(competitors, eq(discoveryAttempts.competitorId, competitors.id))
+      .where(
+        and(
+          eq(discoveryAttempts.productId, products.id),
+          eq(competitors.domain, competitorDomain),
+          or(
+            eq(discoveryAttempts.status, 'pending_review'),
+            and(
+              inArray(discoveryAttempts.status, ['no_match', 'error']),
+              sql`(${discoveryAttempts.retryEligibleAt} IS NULL OR ${discoveryAttempts.retryEligibleAt} > now())`,
+            ),
+          ),
+        ),
+      ),
+  );
+}
+
 // Shared by both MakeupTargetedSyncService and OvicoTargetedSyncService -
 // previously near-identical copy-pasted loadTargets() methods, differing
 // only in competitor domain / rotation queue key / default limit. Pulling
 // this out does not change the selection rule for the unfiltered path (see
-// the early-return below, byte-for-byte the same query shape as before).
+// the early-return below, byte-for-byte the same query shape as before) -
+// discovery_attempts awareness and brand/product policy are layered ON TOP
+// of the pre-existing rules, not a replacement for them. The legacy
+// rotation cursor (discovery-rotation.ts) is deliberately kept for this
+// milestone - see project notes on why it is not removed yet.
 export async function selectDiscoveryTargets(
   database: DatabaseService,
-  competitorDomain: string,
+  competitorDomain: CompetitorDomain,
   rotationQueueKey: string,
   defaultLimit: number,
   options: DiscoveryTargetOptions,
 ): Promise<DiscoveryTargetSelection> {
+  const policyContext = await loadPolicyContext(database);
+  const isPolicyEligible = (product: DiscoveryTarget) =>
+    policyContext.discoveryEnabled(product.brand, product.id, competitorDomain);
   const base = database.db
     .select({
       id: products.id,
@@ -117,6 +171,7 @@ export async function selectDiscoveryTargets(
       eligibleProducts: targets.length,
       filters: { brand: null, inStock: false, onlyUnmatched: false },
       usedRotation: false,
+      rotationWindow: targets,
     };
   }
 
@@ -134,8 +189,20 @@ export async function selectDiscoveryTargets(
   if (!filtersActive) {
     // Exact pre-existing behavior: website-confirmed (url IS NOT NULL) AND
     // no existing match for THIS competitor, id-ascending rotation cursor,
-    // wrapping around when fewer than `limit` remain above it.
-    const eligible = and(isNotNull(products.url), notInArray(products.id, alreadyMatchedOnCompetitor));
+    // wrapping around when fewer than `limit` remain above it - now also
+    // excluding pending_review/not-yet-retry-eligible SKUs (discovery_
+    // attempts) at the SQL level. Brand/product discovery policy is a JS
+    // post-filter (see isPolicyEligible) for the same reason the existing
+    // brand TEXT filter below is JS-only - canonicalBrand()'s alias table
+    // isn't a plain SQL predicate. This can make a rotation batch come back
+    // smaller than `limit` when policy excludes products within the
+    // fetched id-window; accepted for this milestone rather than adding a
+    // multi-round top-up query (see project notes).
+    const eligible = and(
+      isNotNull(products.url),
+      notInArray(products.id, alreadyMatchedOnCompetitor),
+      not(blockedByDiscoveryAttempt(database, competitorDomain)),
+    );
 
     const [{ value: eligibleProducts }] = await database.db
       .select({ value: count() })
@@ -149,7 +216,7 @@ export async function selectDiscoveryTargets(
       .orderBy(products.id)
       .limit(limit);
 
-    const targets =
+    const rawTargets =
       afterCursor.length >= limit
         ? afterCursor
         : [
@@ -160,11 +227,14 @@ export async function selectDiscoveryTargets(
               .limit(limit - afterCursor.length)),
           ];
 
+    const targets = rawTargets.filter(isPolicyEligible);
+
     return {
       targets,
       eligibleProducts,
       filters: { brand: null, inStock: false, onlyUnmatched: true },
       usedRotation: true,
+      rotationWindow: rawTargets,
     };
   }
 
@@ -173,19 +243,22 @@ export async function selectDiscoveryTargets(
   // or advanced for this path).
   const onlyUnmatched = options.onlyUnmatched ?? true;
 
-  const conditions = [isNotNull(products.url)];
+  const conditions = [isNotNull(products.url), not(blockedByDiscoveryAttempt(database, competitorDomain))];
   if (onlyUnmatched) conditions.push(notInArray(products.id, alreadyMatchedOnCompetitor));
   if (options.inStock) conditions.push(eq(products.available, true));
 
   const pool = await base.where(and(...conditions));
 
-  // Brand comparison needs canonicalBrand()'s alias table, which isn't
-  // expressible as a plain SQL predicate - filtered in JS after the (cheap,
-  // already-small) pool is loaded. 17k total products / ~100 distinct
-  // brands at the time of writing, so this is a non-issue performance-wise.
-  const filteredPool = options.brand
+  // Brand TEXT filter (user-requested, e.g. --brand="Clarins") needs
+  // canonicalBrand()'s alias table, which isn't expressible as a plain SQL
+  // predicate - filtered in JS after the (cheap, already-small) pool is
+  // loaded, same as before this milestone. Brand/product discovery POLICY
+  // (independent of the user's optional brand filter) is applied the same
+  // way right after.
+  const brandFilteredPool = options.brand
     ? pool.filter(product => matchesBrandFilter(product.brand, options.brand!))
     : pool;
+  const filteredPool = brandFilteredPool.filter(isPolicyEligible);
 
   const targets = randomSample(filteredPool, limit);
 
@@ -198,6 +271,7 @@ export async function selectDiscoveryTargets(
       onlyUnmatched,
     },
     usedRotation: false,
+    rotationWindow: targets,
   };
 }
 

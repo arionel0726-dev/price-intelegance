@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { competitorProducts, competitorProductVariants, competitors, eq, matches } from '@price/db';
+import { competitorProducts, competitorProductVariants, competitors, eq, matches, products } from '@price/db';
 
 import { DatabaseService } from '../database/database.service';
+import { PolicyService } from '../policy/policy.service';
 import { OvicoSyncService } from './ovico-sync.service';
 
 export type OvicoRefreshResult = {
@@ -26,6 +27,7 @@ export class OvicoRefreshService {
   constructor(
     private readonly database: DatabaseService,
     private readonly ovicoSync: OvicoSyncService,
+    private readonly policy: PolicyService,
   ) {}
 
   async refresh(): Promise<OvicoRefreshResult> {
@@ -35,15 +37,21 @@ export class OvicoRefreshService {
       .select({
         competitorProductId: competitorProducts.id,
         url: competitorProducts.url,
+        vizajeProductId: matches.productId,
+        vizajeBrand: products.brand,
       })
       .from(matches)
       .innerJoin(competitorProductVariants, eq(matches.competitorProductVariantId, competitorProductVariants.id))
       .innerJoin(competitorProducts, eq(competitorProductVariants.competitorProductId, competitorProducts.id))
       .innerJoin(competitors, eq(competitorProducts.competitorId, competitors.id))
+      .innerJoin(products, eq(matches.productId, products.id))
       .where(eq(competitors.domain, 'ovico.md'));
 
+    const policyContext = await this.policy.loadContext();
+    const allowedRows = rows.filter(row => policyContext.priceMonitoringEnabled(row.vizajeBrand, row.vizajeProductId));
+
     const uniqueUrlsByProductId = new Map<number, string>();
-    for (const row of rows) uniqueUrlsByProductId.set(row.competitorProductId, row.url);
+    for (const row of allowedRows) uniqueUrlsByProductId.set(row.competitorProductId, row.url);
 
     let parentsUpdated = 0;
     let parentsFailed = 0;

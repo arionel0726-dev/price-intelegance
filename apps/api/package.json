@@ -27,7 +27,8 @@
     "jobs:makeup-discovery": "bun run scripts/run-job.ts makeup-discovery",
     "jobs:makeup-refresh": "bun run scripts/run-job.ts makeup-refresh",
     "jobs:ovico-discovery": "bun run scripts/run-job.ts ovico-discovery",
-    "jobs:ovico-refresh": "bun run scripts/run-job.ts ovico-refresh"
+    "jobs:ovico-refresh": "bun run scripts/run-job.ts ovico-refresh",
+    "backfill:brands": "bun run scripts/backfill-brands.ts"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",

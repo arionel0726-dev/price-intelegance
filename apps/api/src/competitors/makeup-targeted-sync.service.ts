@@ -5,6 +5,7 @@ import { canonicalBrand } from '../matching/matching-normalization';
 import { MatchingService } from '../matching/matching.service';
 import { isPlausibleCandidate } from './candidate-prefilter';
 import { CompetitorPersistenceService } from './competitor-persistence.service';
+import { DiscoveryStateService } from './discovery-state.service';
 import { advanceRotationCursorPastProcessed, selectDiscoveryTargets, type DiscoveryFilters } from './discovery-targets';
 import {
   chunk,
@@ -22,7 +23,7 @@ import { requestParsedProduct, requestSearchBatch } from './parser-client';
 import type { ParsedProduct, ParsedVariant, SearchResponse } from './parser-client.types';
 import { buildCompetitorSearchQuery } from './search-query-builder';
 
-const MAKEUP_COMPETITOR = { name: 'MAKEUP', domain: 'makeup.md' };
+const MAKEUP_COMPETITOR = { name: 'MAKEUP', domain: 'makeup.md' as const };
 const ROTATION_QUEUE_KEY = 'makeup-discovery';
 
 // Top-of-funnel cap: how many search results even get the cheap pre-filter
@@ -100,6 +101,7 @@ export class MakeupTargetedSyncService {
     private readonly database: DatabaseService,
     private readonly persistence: CompetitorPersistenceService,
     private readonly matching: MatchingService,
+    private readonly discoveryState: DiscoveryStateService,
   ) {}
 
   async sync(options: MakeupTargetedSyncOptions): Promise<MakeupTargetedSyncResult> {
@@ -248,6 +250,7 @@ export class MakeupTargetedSyncService {
 
         if (search.results.length === 0) {
           legitimateZeroResults += 1;
+          await this.discoveryState.recordNoMatch(vizaje.id, competitor.id);
           continue;
         }
 
@@ -260,13 +263,17 @@ export class MakeupTargetedSyncService {
 
         if (plausible.length === 0) {
           noMatch += 1;
+          await this.discoveryState.recordNoMatch(vizaje.id, competitor.id);
           continue;
         }
 
         let bestAuto: { parsed: ParsedProduct; variant: ParsedVariant; result: ScoredCandidate } | null = null;
-        let sawAmbiguous = false;
+        let bestAmbiguous: { parsed: ParsedProduct; variant: ParsedVariant; result: ScoredCandidate } | null = null;
+        let parseAttempts = 0;
+        let parseSuccesses = 0;
 
         for (const candidate of plausible) {
+          parseAttempts += 1;
           let parsed: ParsedProduct;
 
           try {
@@ -276,6 +283,7 @@ export class MakeupTargetedSyncService {
             continue;
           }
 
+          parseSuccesses += 1;
           candidatesParsedTotal += 1;
 
           if (canonicalBrand(vizaje.brand) !== canonicalBrand(parsed.brand)) {
@@ -294,52 +302,109 @@ export class MakeupTargetedSyncService {
                 bestAuto = { parsed, variant, result };
               }
             } else if (result.decision === 'ambiguous') {
-              sawAmbiguous = true;
+              if (!bestAmbiguous || result.score > bestAmbiguous.result.score) {
+                bestAmbiguous = { parsed, variant, result };
+              }
             }
           }
         }
 
-        if (!bestAuto) {
-          if (sawAmbiguous) ambiguous += 1;
-          else noMatch += 1;
+        if (bestAuto) {
+          try {
+            const persisted = await this.persistence.persistProduct(competitor.id, bestAuto.parsed);
+            const variantId = bestAuto.variant.external_id
+              ? persisted.variantIdByExternalId.get(bestAuto.variant.external_id)
+              : undefined;
+
+            if (!variantId) {
+              persistErrors += 1;
+              await this.discoveryState.recordError(vizaje.id, competitor.id, 'persist_error_missing_variant');
+              continue;
+            }
+
+            const { outcome } = await this.matching.persistSingleAutoMatch(
+              vizaje.id,
+              competitor.id,
+              variantId,
+              bestAuto.result.score,
+            );
+
+            auto += 1;
+            autoMatches.push({
+              vizajeId: vizaje.id,
+              vizajeBrand: vizaje.brand,
+              vizajeName: vizaje.name,
+              competitorExternalId: bestAuto.parsed.external_id ?? '',
+              competitorTitle: bestAuto.parsed.title,
+              variantLabel: bestAuto.variant.label,
+              variantVolume: bestAuto.variant.volume,
+              price: bestAuto.variant.price,
+              score: bestAuto.result.score,
+              outcome,
+            });
+            await this.discoveryState.recordMatched(vizaje.id, competitor.id);
+          } catch (error) {
+            persistErrors += 1;
+            this.logger.warn(`persist failed for vizaje id=${vizaje.id}: ${String(error)}`);
+            await this.discoveryState.recordError(vizaje.id, competitor.id, 'persist_error');
+          }
           continue;
         }
 
-        try {
-          const persisted = await this.persistence.persistProduct(competitor.id, bestAuto.parsed);
-          const variantId = bestAuto.variant.external_id
-            ? persisted.variantIdByExternalId.get(bestAuto.variant.external_id)
-            : undefined;
+        if (bestAmbiguous) {
+          // AI is disabled this milestone - the ambiguous outcome must not
+          // be silently lost or silently auto-approved. It is persisted as
+          // a review candidate (reviewStatus='pending', aiVerdict NULL) and
+          // the pair is marked pending_review so it is never reselected
+          // until a future AI/manual review resolves it. See
+          // discovery-state.service.ts.
+          try {
+            const persisted = await this.persistence.persistProduct(competitor.id, bestAmbiguous.parsed);
+            const variantId = bestAmbiguous.variant.external_id
+              ? persisted.variantIdByExternalId.get(bestAmbiguous.variant.external_id)
+              : undefined;
 
-          if (!variantId) {
+            if (!variantId) {
+              persistErrors += 1;
+              await this.discoveryState.recordError(vizaje.id, competitor.id, 'persist_error_missing_variant');
+              continue;
+            }
+
+            ambiguous += 1;
+            await this.discoveryState.recordAmbiguous({
+              productId: vizaje.id,
+              competitorId: competitor.id,
+              competitorProductVariantId: variantId,
+              snapshotTitle: bestAmbiguous.parsed.title,
+              snapshotVariantLabel: bestAmbiguous.variant.label,
+              snapshotVariantVolume: bestAmbiguous.variant.volume,
+              snapshotPrice: bestAmbiguous.variant.price != null ? bestAmbiguous.variant.price.toFixed(2) : null,
+              snapshotUrl: bestAmbiguous.parsed.url,
+              snapshotImageUrl: bestAmbiguous.parsed.image_url,
+              ruleScore: bestAmbiguous.result.score,
+              ruleSignals: bestAmbiguous.result.signals,
+            });
+          } catch (error) {
             persistErrors += 1;
-            continue;
+            this.logger.warn(`candidate persist failed for vizaje id=${vizaje.id}: ${String(error)}`);
+            await this.discoveryState.recordError(vizaje.id, competitor.id, 'candidate_persist_error');
           }
-
-          const { outcome } = await this.matching.persistSingleAutoMatch(
-            vizaje.id,
-            competitor.id,
-            variantId,
-            bestAuto.result.score,
-          );
-
-          auto += 1;
-          autoMatches.push({
-            vizajeId: vizaje.id,
-            vizajeBrand: vizaje.brand,
-            vizajeName: vizaje.name,
-            competitorExternalId: bestAuto.parsed.external_id ?? '',
-            competitorTitle: bestAuto.parsed.title,
-            variantLabel: bestAuto.variant.label,
-            variantVolume: bestAuto.variant.volume,
-            price: bestAuto.variant.price,
-            score: bestAuto.result.score,
-            outcome,
-          });
-        } catch (error) {
-          persistErrors += 1;
-          this.logger.warn(`persist failed for vizaje id=${vizaje.id}: ${String(error)}`);
+          continue;
         }
+
+        if (parseAttempts > 0 && parseSuccesses === 0) {
+          // Every candidate-page parse threw - an operational failure, not
+          // a content-based no-match. Kept in the `noMatch` counter above
+          // for backward-compatible run-report shape, but persisted as a
+          // distinct 'error' state so it can be told apart from a genuine
+          // no-match and retried sooner.
+          noMatch += 1;
+          await this.discoveryState.recordError(vizaje.id, competitor.id, 'candidate_parse_failed');
+          continue;
+        }
+
+        noMatch += 1;
+        await this.discoveryState.recordNoMatch(vizaje.id, competitor.id);
       }
 
       const limitReason = exceedsSafetyLimits();
@@ -363,7 +428,7 @@ export class MakeupTargetedSyncService {
     // unfiltered routine queue (see selectDiscoveryTargets's usedRotation) -
     // a filtered/random-selection run must not move this cursor.
     if (selection.usedRotation) {
-      advanceRotationCursorPastProcessed(ROTATION_QUEUE_KEY, targets, deferredProductIds);
+      advanceRotationCursorPastProcessed(ROTATION_QUEUE_KEY, selection.rotationWindow, deferredProductIds);
     }
 
     return {

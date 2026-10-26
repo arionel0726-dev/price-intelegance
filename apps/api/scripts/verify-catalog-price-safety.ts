@@ -24,13 +24,14 @@ import {
 } from '@price/db';
 
 import { DatabaseService } from '../src/database/database.service';
+import { PolicyService } from '../src/policy/policy.service';
 import { ProductsService } from '../src/products/products.service';
 
 const MARK = 'ZZTESTFIX';
 
 async function main() {
   const database = new DatabaseService();
-  const service = new ProductsService(database);
+  const service = new ProductsService(database, new PolicyService(database));
   const db = database.db;
 
   let failures = 0;
@@ -187,7 +188,11 @@ async function main() {
   await match(multiId, await insertCompetitorOffer('multi-b', '1200.00'));
 
   console.log('Running ProductsService.findAll()...');
-  const result = await service.findAll({ search: MARK, limit: 50 });
+  // includeHidden: true - this script's fixtures never set imageUrl (not
+  // what it's testing) and would otherwise be hidden by the Price
+  // Intelligence milestone 1 catalog image/visibility defaults, unrelated
+  // to the price-pairing correctness this script actually verifies.
+  const result = await service.findAll({ search: MARK, limit: 50, includeHidden: true });
   const byId = new Map(result.items.map(item => [item.id, item]));
 
   console.log('\nAsserting...');

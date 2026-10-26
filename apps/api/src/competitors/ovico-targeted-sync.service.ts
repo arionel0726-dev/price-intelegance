@@ -4,12 +4,13 @@ import { scoreCandidate, type ScoredCandidate } from '../matching/candidate-scor
 import { MatchingService } from '../matching/matching.service';
 import { rankPlausibleCandidates } from './candidate-prefilter';
 import { CompetitorPersistenceService } from './competitor-persistence.service';
+import { DiscoveryStateService } from './discovery-state.service';
 import { advanceRotationCursorPastProcessed, selectDiscoveryTargets, type DiscoveryFilters } from './discovery-targets';
 import { requestParsedProduct, requestSearch } from './parser-client';
 import type { ParsedProduct, ParsedVariant, SearchResultItem } from './parser-client.types';
 import { buildCompetitorSearchQuery } from './search-query-builder';
 
-const OVICO_COMPETITOR = { name: 'OVICO', domain: 'ovico.md' };
+const OVICO_COMPETITOR = { name: 'OVICO', domain: 'ovico.md' as const };
 const ROTATION_QUEUE_KEY = 'ovico-discovery';
 
 // OVICO costs ~30s per HTTP request (mandatory Crawl-delay: 30, enforced by
@@ -79,6 +80,7 @@ export class OvicoTargetedSyncService {
     private readonly database: DatabaseService,
     private readonly persistence: CompetitorPersistenceService,
     private readonly matching: MatchingService,
+    private readonly discoveryState: DiscoveryStateService,
   ) {}
 
   async sync(options: OvicoTargetedSyncOptions): Promise<OvicoTargetedSyncResult> {
@@ -138,6 +140,7 @@ export class OvicoTargetedSyncService {
         errors += 1;
         this.logger.warn(`search failed for vizaje id=${vizaje.id}: ${String(error)}`);
         this.logDiagnostic(diag);
+        await this.discoveryState.recordError(vizaje.id, competitor.id, 'search_error');
         continue;
       }
 
@@ -145,13 +148,17 @@ export class OvicoTargetedSyncService {
         noMatch += 1;
         diag.decision = 'noMatch';
         this.logDiagnostic(diag);
+        await this.discoveryState.recordNoMatch(vizaje.id, competitor.id);
         continue;
       }
 
       let bestAuto: { parsed: ParsedProduct; variant: ParsedVariant; result: ScoredCandidate } | null = null;
-      let sawAmbiguous = false;
+      let bestAmbiguous: { parsed: ParsedProduct; variant: ParsedVariant; result: ScoredCandidate } | null = null;
+      let parseAttempts = 0;
+      let parseSuccesses = 0;
 
       for (const candidate of ranked.slice(0, MAX_CANDIDATES_PARSED)) {
+        parseAttempts += 1;
         let parsed: ParsedProduct;
 
         try {
@@ -161,6 +168,7 @@ export class OvicoTargetedSyncService {
           continue;
         }
 
+        parseSuccesses += 1;
         candidateParses += 1;
         diag.parsedCount += 1;
 
@@ -184,78 +192,131 @@ export class OvicoTargetedSyncService {
               bestAuto = { parsed, variant, result };
             }
           } else if (result.decision === 'ambiguous') {
-            sawAmbiguous = true;
+            if (!bestAmbiguous || result.score > bestAmbiguous.result.score) {
+              bestAmbiguous = { parsed, variant, result };
+            }
           }
         }
 
         // Stop after the first candidate unless it came back clearly weak -
         // that's the whole point of the request-budget cap. "Clearly weak"
         // means nothing auto and nothing even ambiguous from it.
-        if (bestAuto || sawAmbiguous) {
+        if (bestAuto || bestAmbiguous) {
           break;
         }
       }
 
-      if (!bestAuto) {
-        if (sawAmbiguous) {
-          ambiguous += 1;
-          diag.decision = 'ambiguous';
-        } else {
-          noMatch += 1;
-          diag.decision = 'noMatch';
+      if (bestAuto) {
+        diag.decision = 'auto';
+        diag.score = bestAuto.result.score;
+        diag.rejectReason = null;
+
+        try {
+          const persisted = await this.persistence.persistProduct(competitor.id, bestAuto.parsed);
+          const variantId = bestAuto.variant.external_id
+            ? persisted.variantIdByExternalId.get(bestAuto.variant.external_id)
+            : undefined;
+
+          if (!variantId) {
+            errors += 1;
+            diag.decision = 'error';
+            this.logDiagnostic(diag);
+            await this.discoveryState.recordError(vizaje.id, competitor.id, 'persist_error_missing_variant');
+            continue;
+          }
+
+          const { outcome } = await this.matching.persistSingleAutoMatch(
+            vizaje.id,
+            competitor.id,
+            variantId,
+            bestAuto.result.score,
+          );
+
+          auto += 1;
+          autoMatches.push({
+            vizajeId: vizaje.id,
+            vizajeBrand: vizaje.brand,
+            vizajeName: vizaje.name,
+            competitorExternalId: bestAuto.parsed.external_id ?? '',
+            competitorTitle: bestAuto.parsed.title,
+            variantLabel: bestAuto.variant.label,
+            variantVolume: bestAuto.variant.volume,
+            price: bestAuto.variant.price,
+            score: bestAuto.result.score,
+            outcome,
+          });
+          this.logDiagnostic(diag);
+          await this.discoveryState.recordMatched(vizaje.id, competitor.id);
+        } catch (error) {
+          errors += 1;
+          diag.decision = 'error';
+          this.logger.warn(`persist failed for vizaje id=${vizaje.id}: ${String(error)}`);
+          this.logDiagnostic(diag);
+          await this.discoveryState.recordError(vizaje.id, competitor.id, 'persist_error');
         }
-        this.logDiagnostic(diag);
         continue;
       }
 
-      diag.decision = 'auto';
-      diag.score = bestAuto.result.score;
-      diag.rejectReason = null;
+      if (bestAmbiguous) {
+        diag.decision = 'ambiguous';
+        diag.score = bestAmbiguous.result.score;
+        diag.rejectReason = null;
 
-      try {
-        const persisted = await this.persistence.persistProduct(competitor.id, bestAuto.parsed);
-        const variantId = bestAuto.variant.external_id
-          ? persisted.variantIdByExternalId.get(bestAuto.variant.external_id)
-          : undefined;
+        try {
+          const persisted = await this.persistence.persistProduct(competitor.id, bestAmbiguous.parsed);
+          const variantId = bestAmbiguous.variant.external_id
+            ? persisted.variantIdByExternalId.get(bestAmbiguous.variant.external_id)
+            : undefined;
 
-        if (!variantId) {
+          if (!variantId) {
+            errors += 1;
+            diag.decision = 'error';
+            this.logDiagnostic(diag);
+            await this.discoveryState.recordError(vizaje.id, competitor.id, 'persist_error_missing_variant');
+            continue;
+          }
+
+          ambiguous += 1;
+          this.logDiagnostic(diag);
+          await this.discoveryState.recordAmbiguous({
+            productId: vizaje.id,
+            competitorId: competitor.id,
+            competitorProductVariantId: variantId,
+            snapshotTitle: bestAmbiguous.parsed.title,
+            snapshotVariantLabel: bestAmbiguous.variant.label,
+            snapshotVariantVolume: bestAmbiguous.variant.volume,
+            snapshotPrice: bestAmbiguous.variant.price != null ? bestAmbiguous.variant.price.toFixed(2) : null,
+            snapshotUrl: bestAmbiguous.parsed.url,
+            snapshotImageUrl: bestAmbiguous.parsed.image_url,
+            ruleScore: bestAmbiguous.result.score,
+            ruleSignals: bestAmbiguous.result.signals,
+          });
+        } catch (error) {
           errors += 1;
           diag.decision = 'error';
+          this.logger.warn(`candidate persist failed for vizaje id=${vizaje.id}: ${String(error)}`);
           this.logDiagnostic(diag);
-          continue;
+          await this.discoveryState.recordError(vizaje.id, competitor.id, 'candidate_persist_error');
         }
-
-        const { outcome } = await this.matching.persistSingleAutoMatch(
-          vizaje.id,
-          competitor.id,
-          variantId,
-          bestAuto.result.score,
-        );
-
-        auto += 1;
-        autoMatches.push({
-          vizajeId: vizaje.id,
-          vizajeBrand: vizaje.brand,
-          vizajeName: vizaje.name,
-          competitorExternalId: bestAuto.parsed.external_id ?? '',
-          competitorTitle: bestAuto.parsed.title,
-          variantLabel: bestAuto.variant.label,
-          variantVolume: bestAuto.variant.volume,
-          price: bestAuto.variant.price,
-          score: bestAuto.result.score,
-          outcome,
-        });
-        this.logDiagnostic(diag);
-      } catch (error) {
-        errors += 1;
-        diag.decision = 'error';
-        this.logger.warn(`persist failed for vizaje id=${vizaje.id}: ${String(error)}`);
-        this.logDiagnostic(diag);
+        continue;
       }
+
+      if (parseAttempts > 0 && parseSuccesses === 0) {
+        noMatch += 1;
+        diag.decision = 'noMatch';
+        this.logDiagnostic(diag);
+        await this.discoveryState.recordError(vizaje.id, competitor.id, 'candidate_parse_failed');
+        continue;
+      }
+
+      noMatch += 1;
+      diag.decision = 'noMatch';
+      this.logDiagnostic(diag);
+      await this.discoveryState.recordNoMatch(vizaje.id, competitor.id);
     }
 
     if (selection.usedRotation) {
-      advanceRotationCursorPastProcessed(ROTATION_QUEUE_KEY, targets, []);
+      advanceRotationCursorPastProcessed(ROTATION_QUEUE_KEY, selection.rotationWindow, []);
     }
 
     return {

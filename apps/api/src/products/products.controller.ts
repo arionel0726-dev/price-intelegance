@@ -8,6 +8,8 @@ class ProductsListQueryDto {
   search?: string;
   brand?: string;
   category?: string;
+  // Admin/Data Quality escape hatch - see ProductsListQuery.includeHidden.
+  includeHidden?: string;
 }
 
 @Controller('products')
@@ -22,6 +24,7 @@ export class ProductsController {
       search: query.search,
       brand: query.brand,
       category: query.category,
+      includeHidden: query.includeHidden === 'true',
     });
   }
 
