@@ -7,6 +7,7 @@ import {
   eq,
   matches,
   products,
+  type DbOrTx,
 } from '@price/db';
 
 import { DatabaseService } from '../database/database.service';
@@ -180,9 +181,12 @@ export class MatchingService {
     existing:
       | { matchId: number; variantId: number; source: string; score: number | null }
       | undefined,
+    tx?: DbOrTx,
   ): Promise<'inserted' | 'updated' | 'unchanged' | 'conflict' | 'skippedManual'> {
+    const db = tx ?? this.database.db;
+
     if (!existing) {
-      await this.database.db
+      await db
         .insert(matches)
         .values({
           productId: vizajeProductId,
@@ -206,7 +210,7 @@ export class MatchingService {
 
     if (existing.variantId === variantId) {
       if (existing.score !== score) {
-        await this.database.db
+        await db
           .update(matches)
           .set({ score })
           .where(eq(matches.id, existing.matchId));
@@ -224,7 +228,7 @@ export class MatchingService {
     const existingScore = existing.score ?? 0;
 
     if (score - existingScore >= AUTO_MARGIN_MIN_POINTS) {
-      await this.database.db
+      await db
         .update(matches)
         .set({ competitorProductVariantId: variantId, score, source: 'auto' })
         .where(eq(matches.id, existing.matchId));
@@ -240,26 +244,34 @@ export class MatchingService {
   // recomputing/rescoring the rest of the catalog. Used by targeted-search
   // sync: score a single freshly-parsed candidate, decide AUTO, then persist
   // just that one pair.
+  // `tx` (optional) lets a caller join this write to its own transaction -
+  // see DiscoveryWorkerService/*SkuDiscoveryService's AUTO-outcome
+  // handling, which needs this `matches` insert/update to commit
+  // atomically with the matched outcome's job_events row (counter/
+  // outcome idempotency - see project notes).
   async persistSingleAutoMatch(
     vizajeProductId: number,
     competitorId: number,
     variantId: number,
     score: number,
+    tx?: DbOrTx,
   ): Promise<{
     outcome: 'inserted' | 'updated' | 'unchanged' | 'conflict' | 'skippedManual';
   }> {
-    const existingByKey = await this.loadExistingMatchesByProductCompetitor();
+    const existingByKey = await this.loadExistingMatchesByProductCompetitor(tx);
     const existing = existingByKey.get(`${vizajeProductId}:${competitorId}`);
 
-    const outcome = await this.applyAutoMatch(vizajeProductId, variantId, score, existing);
+    const outcome = await this.applyAutoMatch(vizajeProductId, variantId, score, existing, tx);
 
     return { outcome };
   }
 
-  private async loadExistingMatchesByProductCompetitor(): Promise<
+  private async loadExistingMatchesByProductCompetitor(
+    tx?: DbOrTx,
+  ): Promise<
     Map<string, { matchId: number; variantId: number; source: string; score: number | null }>
   > {
-    const rows = await this.database.db
+    const rows = await (tx ?? this.database.db)
       .select({
         matchId: matches.id,
         productId: matches.productId,

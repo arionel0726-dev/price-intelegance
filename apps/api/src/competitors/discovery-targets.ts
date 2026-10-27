@@ -1,5 +1,6 @@
 import {
   and,
+  asc,
   competitorProductVariants,
   competitorProducts,
   competitors,
@@ -10,6 +11,7 @@ import {
   gt,
   inArray,
   isNotNull,
+  jobRuns,
   lte,
   matches,
   not,
@@ -100,13 +102,16 @@ export function randomSample<T>(pool: readonly T[], limit: number): T[] {
 }
 
 // Excludes a product from the SQL-eligible set while it is pending_review
-// (awaiting a future AI/manual review - must never be reselected) or while
-// a no_match/error outcome's retry backoff hasn't elapsed yet. Joined via
-// competitors.domain (not a resolved id) to mirror the existing
-// `alreadyMatchedOnCompetitor` subquery's shape - if the competitor row
-// doesn't exist yet (never synced), this simply matches nothing, same as
-// that subquery. "processing" is deliberately not referenced here - this
-// milestone never persists that status (see discovery-state.service.ts).
+// (awaiting a future AI/manual review - must never be reselected), while a
+// no_match/error outcome's retry backoff hasn't elapsed yet, OR while it is
+// 'processing' for a job_run that is still actually alive (status IN
+// ('running','stopping')). A 'processing' row whose owning job is NOT alive
+// (requeued, cancelled, completed, failed, or lastJobRunId is NULL because
+// it predates the worker) is NOT blocked - this is the mechanism that makes
+// "a dead job's in-flight SKU becomes selectable again" fall out of the
+// ordinary eligibility query, with no separate sweep over discoveryAttempts
+// needed (see Milestone 2 DiscoveryWorkerService reconciliation, which only
+// ever touches job_runs rows).
 function blockedByDiscoveryAttempt(database: DatabaseService, competitorDomain: CompetitorDomain) {
   return exists(
     database.db
@@ -123,10 +128,128 @@ function blockedByDiscoveryAttempt(database: DatabaseService, competitorDomain: 
               inArray(discoveryAttempts.status, ['no_match', 'error']),
               sql`(${discoveryAttempts.retryEligibleAt} IS NULL OR ${discoveryAttempts.retryEligibleAt} > now())`,
             ),
+            and(
+              eq(discoveryAttempts.status, 'processing'),
+              exists(
+                database.db
+                  .select({ id: jobRuns.id })
+                  .from(jobRuns)
+                  .where(
+                    and(
+                      eq(jobRuns.id, discoveryAttempts.lastJobRunId),
+                      inArray(jobRuns.status, ['running', 'stopping']),
+                    ),
+                  ),
+              ),
+            ),
           ),
         ),
       ),
   );
+}
+
+// Same "not matched yet on this competitor" subquery used by every
+// selection path - pulled out once so selectNextContinuousTarget doesn't
+// repeat it a third time.
+function alreadyMatchedOnCompetitorSubquery(database: DatabaseService, competitorDomain: CompetitorDomain) {
+  return database.db
+    .select({ productId: matches.productId })
+    .from(matches)
+    .innerJoin(competitorProductVariants, eq(matches.competitorProductVariantId, competitorProductVariants.id))
+    .innerJoin(competitorProducts, eq(competitorProductVariants.competitorProductId, competitorProducts.id))
+    .innerJoin(competitors, eq(competitorProducts.competitorId, competitors.id))
+    .where(eq(competitors.domain, competitorDomain));
+}
+
+// Bounded window of candidates considered per selectNextContinuousTarget()
+// call before applying the brand/policy JS filter - see selectDiscoveryTargets's
+// existing comment on why canonicalBrand() can't be a SQL predicate. 200 is
+// generous for a ~17k-product / ~100-brand catalog (same scale reasoning
+// already used elsewhere in this file).
+const CONTINUOUS_SELECTION_WINDOW = 200;
+
+export type ContinuousSelectionOptions = {
+  brand?: string;
+  inStock?: boolean;
+  onlyUnmatched?: boolean;
+};
+
+// Milestone 2: the one-SKU-at-a-time selector the DiscoveryWorkerService
+// calls before EVERY product (never once per job) - policy/eligibility is
+// therefore always evaluated live, never snapshotted into job_runs.params.
+// Deterministic ordering: never-checked products first (lowest id first),
+// then retry-eligible products oldest-retryEligibleAt-first - this REPLACES
+// the legacy random-sample/rotation-cursor behavior for the job-driven path
+// only; selectDiscoveryTargets() above (used by the legacy CLI sync()
+// methods) is unchanged.
+export async function selectNextContinuousTarget(
+  database: DatabaseService,
+  competitorDomain: CompetitorDomain,
+  options: ContinuousSelectionOptions,
+): Promise<DiscoveryTarget | null> {
+  const policyContext = await loadPolicyContext(database);
+  const isEligible = (product: DiscoveryTarget) =>
+    (!options.brand || matchesBrandFilter(product.brand, options.brand)) &&
+    policyContext.discoveryEnabled(product.brand, product.id, competitorDomain);
+
+  const onlyUnmatched = options.onlyUnmatched ?? true;
+  const alreadyMatched = alreadyMatchedOnCompetitorSubquery(database, competitorDomain);
+
+  const baseConditions = [isNotNull(products.url), not(blockedByDiscoveryAttempt(database, competitorDomain))];
+  if (onlyUnmatched) baseConditions.push(notInArray(products.id, alreadyMatched));
+  if (options.inStock) baseConditions.push(eq(products.available, true));
+
+  const selectColumns = {
+    id: products.id,
+    brand: products.brand,
+    name: products.name,
+    volume: products.volume,
+    color: products.color,
+  };
+
+  // Phase 1: never-checked (no discovery_attempts row at all for this
+  // product x competitor) - id-ascending for a stable, reproducible order.
+  const neverChecked = await database.db
+    .select(selectColumns)
+    .from(products)
+    .where(
+      and(
+        ...baseConditions,
+        not(
+          exists(
+            database.db
+              .select({ id: discoveryAttempts.id })
+              .from(discoveryAttempts)
+              .innerJoin(competitors, eq(discoveryAttempts.competitorId, competitors.id))
+              .where(
+                and(eq(discoveryAttempts.productId, products.id), eq(competitors.domain, competitorDomain)),
+              ),
+          ),
+        ),
+      ),
+    )
+    .orderBy(asc(products.id))
+    .limit(CONTINUOUS_SELECTION_WINDOW);
+
+  const neverCheckedMatch = neverChecked.find(isEligible);
+  if (neverCheckedMatch) return neverCheckedMatch;
+
+  // Phase 2: has a discovery_attempts row, oldest retryEligibleAt first.
+  // Reaches a no_match/error row whose backoff has elapsed AND a
+  // 'processing' row whose owning job is no longer alive (its
+  // retryEligibleAt is NULL, so it sorts after timestamped rows via
+  // Postgres's default NULLS LAST on ASC - acceptable: a revived
+  // in-flight SKU is not time-critical relative to an overdue retry).
+  const retryEligible = await database.db
+    .select(selectColumns)
+    .from(products)
+    .innerJoin(discoveryAttempts, eq(discoveryAttempts.productId, products.id))
+    .innerJoin(competitors, eq(discoveryAttempts.competitorId, competitors.id))
+    .where(and(...baseConditions, eq(competitors.domain, competitorDomain)))
+    .orderBy(asc(discoveryAttempts.retryEligibleAt))
+    .limit(CONTINUOUS_SELECTION_WINDOW);
+
+  return retryEligible.find(isEligible) ?? null;
 }
 
 // Shared by both MakeupTargetedSyncService and OvicoTargetedSyncService -

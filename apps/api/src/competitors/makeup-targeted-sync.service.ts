@@ -1,11 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
-import { scoreCandidate, type ScoredCandidate } from '../matching/candidate-scoring';
-import { canonicalBrand } from '../matching/matching-normalization';
-import { MatchingService } from '../matching/matching.service';
-import { isPlausibleCandidate } from './candidate-prefilter';
 import { CompetitorPersistenceService } from './competitor-persistence.service';
-import { DiscoveryStateService } from './discovery-state.service';
 import { advanceRotationCursorPastProcessed, selectDiscoveryTargets, type DiscoveryFilters } from './discovery-targets';
 import {
   chunk,
@@ -19,23 +14,13 @@ import {
   MAKEUP_MAX_SEARCH_ERROR_RATIO,
   sleep,
 } from './makeup-discovery-pacing';
-import { requestParsedProduct, requestSearchBatch } from './parser-client';
-import type { ParsedProduct, ParsedVariant, SearchResponse } from './parser-client.types';
+import { MakeupSkuDiscoveryService } from './makeup-sku-discovery.service';
+import { requestSearchBatch } from './parser-client';
+import type { SearchResponse } from './parser-client.types';
 import { buildCompetitorSearchQuery } from './search-query-builder';
 
 const MAKEUP_COMPETITOR = { name: 'MAKEUP', domain: 'makeup.md' as const };
 const ROTATION_QUEUE_KEY = 'makeup-discovery';
-
-// Top-of-funnel cap: how many search results even get the cheap pre-filter
-// considered. The parser's own `/search/makeup` call is already asked for a
-// small `limit`; this just guards against a future limit increase silently
-// blowing up parse volume too.
-const MAX_CANDIDATES_CONSIDERED = 5;
-// How many of the plausible candidates actually get a full product-page
-// parse (a real Playwright page load each) - "candidate generation, not
-// matching": search finds a small pool, only a few of those are worth the
-// parse cost.
-const MAX_CANDIDATES_PARSED = 3;
 
 export type MakeupTargetedSyncOptions = {
   limit?: number;
@@ -92,6 +77,16 @@ export type MakeupTargetedSyncResult = {
   durationMs: number;
 };
 
+// Milestone 2 note: the per-product search/score/persist logic below is
+// now a thin loop over MakeupSkuDiscoveryService (see that file) - this
+// class keeps ONLY the batch-shaped concerns that genuinely only make
+// sense across several products at once: request batching, cooldown-
+// pattern detection, inter-batch pacing, and per-run safety-limit ratios.
+// The DiscoveryWorkerService (Milestone 2) calls the same
+// MakeupSkuDiscoveryService directly, one product at a time, with its own
+// adaptation of these batch-shaped concerns (MakeupCooldownTracker,
+// proportional per-SKU pacing) - see project notes for exactly how, and
+// the explicitly reported deviations that one-SKU adaptation required.
 @Injectable()
 export class MakeupTargetedSyncService {
   private readonly logger = new Logger(MakeupTargetedSyncService.name);
@@ -100,8 +95,7 @@ export class MakeupTargetedSyncService {
   constructor(
     private readonly database: DatabaseService,
     private readonly persistence: CompetitorPersistenceService,
-    private readonly matching: MatchingService,
-    private readonly discoveryState: DiscoveryStateService,
+    private readonly skuDiscovery: MakeupSkuDiscoveryService,
   ) {}
 
   async sync(options: MakeupTargetedSyncOptions): Promise<MakeupTargetedSyncResult> {
@@ -248,163 +242,52 @@ export class MakeupTargetedSyncService {
         const vizaje = batch[i]!;
         const search = searchResults[i]!;
 
-        if (search.results.length === 0) {
-          legitimateZeroResults += 1;
-          await this.discoveryState.recordNoMatch(vizaje.id, competitor.id);
-          continue;
-        }
+        if (search.results.length === 0) legitimateZeroResults += 1;
+        else foundCandidates += 1;
 
-        foundCandidates += 1;
+        const outcome = await this.skuDiscovery.scoreAndPersist(vizaje, competitor, search, null);
 
-        const plausible = search.results
-          .filter(result => isPlausibleCandidate(vizaje, result))
-          .slice(0, MAX_CANDIDATES_CONSIDERED)
-          .slice(0, MAX_CANDIDATES_PARSED);
-
-        if (plausible.length === 0) {
-          noMatch += 1;
-          await this.discoveryState.recordNoMatch(vizaje.id, competitor.id);
-          continue;
-        }
-
-        let bestAuto: { parsed: ParsedProduct; variant: ParsedVariant; result: ScoredCandidate } | null = null;
-        let bestAmbiguous: { parsed: ParsedProduct; variant: ParsedVariant; result: ScoredCandidate } | null = null;
-        let parseAttempts = 0;
-        let parseSuccesses = 0;
-
-        for (const candidate of plausible) {
-          parseAttempts += 1;
-          let parsed: ParsedProduct;
-
-          try {
-            parsed = await requestParsedProduct(this.parserUrl, '/parse/makeup/product', candidate.url);
-          } catch (error) {
-            this.logger.warn(`parse failed for ${candidate.url}: ${String(error)}`);
-            continue;
-          }
-
-          parseSuccesses += 1;
-          candidatesParsedTotal += 1;
-
-          if (canonicalBrand(vizaje.brand) !== canonicalBrand(parsed.brand)) {
-            continue;
-          }
-
-          for (const variant of parsed.variants) {
-            const result = scoreCandidate(vizaje, {
-              title: parsed.title,
-              variantLabel: variant.label,
-              variantVolume: variant.volume,
-            });
-
-            if (result.decision === 'auto') {
-              if (!bestAuto || result.score > bestAuto.result.score) {
-                bestAuto = { parsed, variant, result };
-              }
-            } else if (result.decision === 'ambiguous') {
-              if (!bestAmbiguous || result.score > bestAmbiguous.result.score) {
-                bestAmbiguous = { parsed, variant, result };
-              }
-            }
-          }
-        }
-
-        if (bestAuto) {
-          try {
-            const persisted = await this.persistence.persistProduct(competitor.id, bestAuto.parsed);
-            const variantId = bestAuto.variant.external_id
-              ? persisted.variantIdByExternalId.get(bestAuto.variant.external_id)
-              : undefined;
-
-            if (!variantId) {
-              persistErrors += 1;
-              await this.discoveryState.recordError(vizaje.id, competitor.id, 'persist_error_missing_variant');
-              continue;
-            }
-
-            const { outcome } = await this.matching.persistSingleAutoMatch(
-              vizaje.id,
-              competitor.id,
-              variantId,
-              bestAuto.result.score,
-            );
-
+        switch (outcome.kind) {
+          case 'auto':
             auto += 1;
             autoMatches.push({
               vizajeId: vizaje.id,
               vizajeBrand: vizaje.brand,
               vizajeName: vizaje.name,
-              competitorExternalId: bestAuto.parsed.external_id ?? '',
-              competitorTitle: bestAuto.parsed.title,
-              variantLabel: bestAuto.variant.label,
-              variantVolume: bestAuto.variant.volume,
-              price: bestAuto.variant.price,
-              score: bestAuto.result.score,
-              outcome,
+              competitorExternalId: outcome.competitorExternalId,
+              competitorTitle: outcome.competitorTitle,
+              variantLabel: outcome.variantLabel,
+              variantVolume: outcome.variantVolume,
+              price: outcome.price,
+              score: outcome.score,
+              outcome: outcome.matchOutcome,
             });
-            await this.discoveryState.recordMatched(vizaje.id, competitor.id);
-          } catch (error) {
-            persistErrors += 1;
-            this.logger.warn(`persist failed for vizaje id=${vizaje.id}: ${String(error)}`);
-            await this.discoveryState.recordError(vizaje.id, competitor.id, 'persist_error');
-          }
-          continue;
-        }
-
-        if (bestAmbiguous) {
-          // AI is disabled this milestone - the ambiguous outcome must not
-          // be silently lost or silently auto-approved. It is persisted as
-          // a review candidate (reviewStatus='pending', aiVerdict NULL) and
-          // the pair is marked pending_review so it is never reselected
-          // until a future AI/manual review resolves it. See
-          // discovery-state.service.ts.
-          try {
-            const persisted = await this.persistence.persistProduct(competitor.id, bestAmbiguous.parsed);
-            const variantId = bestAmbiguous.variant.external_id
-              ? persisted.variantIdByExternalId.get(bestAmbiguous.variant.external_id)
-              : undefined;
-
-            if (!variantId) {
-              persistErrors += 1;
-              await this.discoveryState.recordError(vizaje.id, competitor.id, 'persist_error_missing_variant');
-              continue;
-            }
-
+            candidatesParsedTotal += outcome.parseSuccesses;
+            break;
+          case 'ambiguous':
             ambiguous += 1;
-            await this.discoveryState.recordAmbiguous({
-              productId: vizaje.id,
-              competitorId: competitor.id,
-              competitorProductVariantId: variantId,
-              snapshotTitle: bestAmbiguous.parsed.title,
-              snapshotVariantLabel: bestAmbiguous.variant.label,
-              snapshotVariantVolume: bestAmbiguous.variant.volume,
-              snapshotPrice: bestAmbiguous.variant.price != null ? bestAmbiguous.variant.price.toFixed(2) : null,
-              snapshotUrl: bestAmbiguous.parsed.url,
-              snapshotImageUrl: bestAmbiguous.parsed.image_url,
-              ruleScore: bestAmbiguous.result.score,
-              ruleSignals: bestAmbiguous.result.signals,
-            });
-          } catch (error) {
-            persistErrors += 1;
-            this.logger.warn(`candidate persist failed for vizaje id=${vizaje.id}: ${String(error)}`);
-            await this.discoveryState.recordError(vizaje.id, competitor.id, 'candidate_persist_error');
-          }
-          continue;
+            candidatesParsedTotal += outcome.parseSuccesses;
+            break;
+          case 'no_match':
+            noMatch += 1;
+            candidatesParsedTotal += outcome.parseSuccesses;
+            break;
+          case 'error':
+            if (outcome.reason === 'candidate_parse_failed') {
+              // Kept in the `noMatch` counter for backward-compatible
+              // run-report shape - see MakeupSkuDiscoveryService notes.
+              noMatch += 1;
+            } else {
+              persistErrors += 1;
+            }
+            candidatesParsedTotal += outcome.parseSuccesses;
+            break;
+          case 'deferred':
+            // Never produced by scoreAndPersist() itself (batch-level
+            // cooldown is handled above, before this loop runs at all) -
+            // exhaustive switch guard only.
+            break;
         }
-
-        if (parseAttempts > 0 && parseSuccesses === 0) {
-          // Every candidate-page parse threw - an operational failure, not
-          // a content-based no-match. Kept in the `noMatch` counter above
-          // for backward-compatible run-report shape, but persisted as a
-          // distinct 'error' state so it can be told apart from a genuine
-          // no-match and retried sooner.
-          noMatch += 1;
-          await this.discoveryState.recordError(vizaje.id, competitor.id, 'candidate_parse_failed');
-          continue;
-        }
-
-        noMatch += 1;
-        await this.discoveryState.recordNoMatch(vizaje.id, competitor.id);
       }
 
       const limitReason = exceedsSafetyLimits();

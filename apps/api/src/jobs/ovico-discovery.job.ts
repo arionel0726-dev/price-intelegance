@@ -2,11 +2,16 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 
 import { OvicoTargetedSyncService } from '../competitors/ovico-targeted-sync.service';
+import { DiscoveryJobsService } from './discovery-jobs.service';
 import { buildEnvelope } from './job-envelope';
 import { JobLockService } from './job-lock.service';
 import type { JobRunEnvelope } from './job-run.types';
 
 const JOB_NAME = 'ovico-discovery';
+
+// See MakeupDiscoveryJob's identical constant for the reasoning - only
+// consulted by the Milestone 2 runScheduled() enqueue path below.
+const SCHEDULED_PRODUCT_BUDGET_SECONDS = Number(process.env.OVICO_DISCOVERY_PRODUCT_BUDGET_SECONDS ?? 300);
 
 // Weekly (Sunday 08:00 Europe/Chisinau, well after MAKEUP discovery's usual
 // completion window) - OVICO's 30s-per-request cost makes discovery
@@ -32,6 +37,7 @@ export class OvicoDiscoveryJob {
   constructor(
     private readonly ovicoTargetedSync: OvicoTargetedSyncService,
     private readonly lock: JobLockService,
+    private readonly discoveryJobs: DiscoveryJobsService,
   ) {}
 
   @Cron('0 8 * * 0', {
@@ -39,11 +45,24 @@ export class OvicoDiscoveryJob {
     timeZone: 'Europe/Chisinau',
     // Off by default - a scheduled run must be explicitly opted into via env,
     // never armed just because the API process happens to be running (e.g.
-    // during local development). See project notes.
+    // during local development). See project notes. UNCHANGED by the
+    // Milestone 2 refactor below.
     disabled: process.env.ENABLE_SCHEDULED_JOBS !== 'true',
   })
+  // Milestone 2: see MakeupDiscoveryJob.runScheduled for the identical
+  // reasoning - enqueues through DiscoveryJobsService instead of calling
+  // .sync() directly. run() below stays as the unchanged manual/CLI path.
   async runScheduled(): Promise<void> {
-    await this.run();
+    try {
+      await this.discoveryJobs.enqueue({
+        competitor: 'ovico',
+        mode: 'limited',
+        limit: DEFAULT_LIMIT,
+        productBudgetSeconds: SCHEDULED_PRODUCT_BUDGET_SECONDS,
+      });
+    } catch (error) {
+      this.logger.warn(`scheduled enqueue skipped: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   // Accepts either a bare limit (legacy call shape - still used by

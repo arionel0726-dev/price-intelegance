@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { and, discoveryAttempts, discoveryCandidates, eq, sql } from '@price/db';
+import { and, discoveryAttempts, discoveryCandidates, eq, sql, type DbOrTx } from '@price/db';
 
 import { DatabaseService } from '../database/database.service';
 import type { MatchSignals } from '../matching/matching.types';
@@ -47,42 +47,64 @@ export class DiscoveryStateService {
 
 	// A confirmed match is represented ONLY by `matches` - clear any leftover
 	// discovery_attempts row for the pair so "matched" is never duplicated as
-	// a status value here.
-	async recordMatched(productId: number, competitorId: number): Promise<void> {
-		await this.database.db
+	// a status value here. Accepts an optional `tx` so a caller (see
+	// DiscoveryWorkerService / *SkuDiscoveryService) can join this write to
+	// its own transaction, e.g. to make it atomic with the job_events insert
+	// for the same outcome - see project notes on counter/outcome
+	// idempotency across a crash.
+	async recordMatched(productId: number, competitorId: number, tx?: DbOrTx): Promise<void> {
+		await (tx ?? this.database.db)
 			.delete(discoveryAttempts)
 			.where(and(eq(discoveryAttempts.productId, productId), eq(discoveryAttempts.competitorId, competitorId)));
 	}
 
-	async recordNoMatch(productId: number, competitorId: number, jobRunId?: number | null): Promise<void> {
+	// Milestone 2: marks the pair as actively being worked by a live job.
+	// Blocks reselection only while the owning job_run is itself
+	// running/stopping (see discovery-targets.ts's blockedByDiscoveryAttempt)
+	// - if that job dies, this exact row becomes selectable again with no
+	// separate sweep required. jobRunId is REQUIRED here (unlike the other
+	// record* methods) since a 'processing' row with no owner could never
+	// be told apart from a dead one.
+	async recordProcessing(productId: number, competitorId: number, jobRunId: number, tx?: DbOrTx): Promise<void> {
+		await this.upsertAttempt(productId, competitorId, {
+			status: 'processing',
+			lastError: null,
+			retryEligibleAt: null,
+			jobRunId,
+			incrementAttempt: false
+		}, tx);
+	}
+
+	async recordNoMatch(productId: number, competitorId: number, jobRunId?: number | null, tx?: DbOrTx): Promise<void> {
 		await this.upsertAttempt(productId, competitorId, {
 			status: 'no_match',
 			lastError: null,
 			retryEligibleAt: new Date(Date.now() + NO_MATCH_RETRY_DAYS * 24 * 60 * 60 * 1000),
 			jobRunId
-		});
+		}, tx);
 	}
 
 	async recordError(
 		productId: number,
 		competitorId: number,
 		lastError: string,
-		jobRunId?: number | null
+		jobRunId?: number | null,
+		tx?: DbOrTx
 	): Promise<void> {
 		await this.upsertAttempt(productId, competitorId, {
 			status: 'error',
 			lastError,
 			retryEligibleAt: new Date(Date.now() + ERROR_RETRY_HOURS * 60 * 60 * 1000),
 			jobRunId
-		});
+		}, tx);
 	}
 
 	// Deterministic-ambiguous outcome: marks the pair pending_review AND
 	// upserts the candidate snapshot in one call, since these two writes
 	// must always happen together (a pending_review attempt with no
 	// corresponding candidate row would be unreviewable, and vice versa).
-	async recordAmbiguous(candidate: AmbiguousCandidateSnapshot): Promise<void> {
-		const db = this.database.db;
+	async recordAmbiguous(candidate: AmbiguousCandidateSnapshot, tx?: DbOrTx): Promise<void> {
+		const db = tx ?? this.database.db;
 
 		await db
 			.insert(discoveryCandidates)
@@ -136,23 +158,38 @@ export class DiscoveryStateService {
 			lastError: null,
 			retryEligibleAt: null,
 			jobRunId: candidate.jobRunId
-		});
+		}, tx);
 	}
 
 	private async upsertAttempt(
 		productId: number,
 		competitorId: number,
-		values: { status: string; lastError: string | null; retryEligibleAt: Date | null; jobRunId?: number | null }
+		values: {
+			status: string;
+			lastError: string | null;
+			retryEligibleAt: Date | null;
+			jobRunId?: number | null;
+			// 'processing' is an in-flight marker, not a completed attempt -
+			// it must not inflate attemptCount. The terminal write that
+			// follows it (recordMatched/recordNoMatch/recordError/
+			// recordAmbiguous) is what actually counts as the attempt, via
+			// the conflict path incrementing from whatever recordProcessing
+			// left behind. Defaults true so every existing call site keeps
+			// its exact pre-existing counting behavior unchanged.
+			incrementAttempt?: boolean;
+		},
+		tx?: DbOrTx
 	): Promise<void> {
 		const now = new Date();
+		const incrementAttempt = values.incrementAttempt ?? true;
 
-		await this.database.db
+		await (tx ?? this.database.db)
 			.insert(discoveryAttempts)
 			.values({
 				productId,
 				competitorId,
 				status: values.status,
-				attemptCount: 1,
+				attemptCount: incrementAttempt ? 1 : 0,
 				lastCheckedAt: now,
 				lastJobRunId: values.jobRunId ?? null,
 				lastError: values.lastError,
@@ -162,7 +199,9 @@ export class DiscoveryStateService {
 				target: [discoveryAttempts.productId, discoveryAttempts.competitorId],
 				set: {
 					status: values.status,
-					attemptCount: sql`${discoveryAttempts.attemptCount} + 1`,
+					attemptCount: incrementAttempt
+						? sql`${discoveryAttempts.attemptCount} + 1`
+						: discoveryAttempts.attemptCount,
 					lastCheckedAt: now,
 					lastJobRunId: values.jobRunId ?? null,
 					lastError: values.lastError,
