@@ -32,19 +32,20 @@ export function Pagination({ page, totalPages, onPageChange }: PaginationProps) 
 					item === 'ellipsis' ? (
 						<span
 							key={`ellipsis-${index}`}
-							className="px-1 text-sm text-muted-foreground"
+							className="px-1 text-sm text-text-muted"
 						>
 							…
 						</span>
 					) : (
 						<button
 							key={item}
+							type="button"
 							onClick={() => onPageChange(item)}
 							aria-current={item === page ? 'page' : undefined}
 							className={
 								item === page
-									? 'flex size-8 shrink-0 items-center justify-center rounded-full bg-foreground text-sm text-background'
-									: 'flex size-8 shrink-0 items-center justify-center rounded-full text-sm hover:bg-muted'
+									? 'flex size-8 shrink-0 items-center justify-center rounded border border-accent bg-accent/10 text-sm font-medium text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent'
+									: 'flex size-8 shrink-0 items-center justify-center rounded text-sm text-text-secondary hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent'
 							}
 						>
 							{item}

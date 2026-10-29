@@ -7,9 +7,17 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-sans);
+  --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
   --font-heading: var(--font-sans);
+  /* Milestone 2.5 editorial palette (light mode only - see project notes). */
+  --color-surface: var(--surface);
+  --color-hairline: var(--hairline);
+  --color-accent: var(--accent-brand);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-tertiary: var(--text-tertiary);
+  --color-text-muted: var(--text-muted);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -50,9 +58,24 @@
 }
 
 :root {
-  --background: oklch(1 0 0);
+  /* Milestone 2.5 editorial tokens (Intercom-adjacent feel, light mode
+     only - no dark-mode story for these yet, see project notes). Kept as
+     their own variables (not overwriting shadcn's --background/--card/
+     --muted-foreground etc.) so shared ui/ primitives outside the catalog
+     keep their existing look; the catalog feature opts into these via the
+     text-primary/text-secondary/text-tertiary/text-muted/surface/hairline/
+     accent utility classes wired above. */
+  --surface: #f1eee9;
+  --hairline: #dedbd6;
+  --accent-brand: #0007cb;
+  --text-primary: #111111;
+  --text-secondary: #414141;
+  --text-tertiary: #585858;
+  --text-muted: #888888;
+
+  --background: #faf9f6;
   --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
+  --card: #ffffff;
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
@@ -69,15 +92,19 @@
      lower chroma than --destructive so neither reads as a loud warning
      color (see the price-color UI spec). */
   --price-favorable: oklch(0.52 0.13 145);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --border: #dedbd6;
+  --input: #dedbd6;
+  --ring: #0007cb;
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
-  --radius: 0.625rem;
+  /* Milestone 2.5: 4px radius everywhere (cards/inputs/buttons/tags) -
+     the shadcn radius scale (--radius-sm/md/lg/xl/...) derives from this
+     one value above, so changing it here is enough; no shadow/gradient
+     utilities are introduced anywhere in the catalog feature. */
+  --radius: 0.25rem;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);

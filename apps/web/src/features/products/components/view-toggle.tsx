@@ -14,7 +14,7 @@ export function ViewToggle({ view, onViewChange }: ViewToggleProps) {
 		<div
 			role="group"
 			aria-label="Catalog view"
-			className="inline-flex items-center gap-0.5 rounded-full bg-muted p-1"
+			className="inline-flex items-center gap-0.5 rounded border border-hairline bg-card p-1"
 		>
 			<ViewToggleButton
 				label="Grid view"
@@ -54,10 +54,10 @@ function ViewToggleButton({
 			aria-label={label}
 			title={label}
 			className={cn(
-				'flex size-7 items-center justify-center rounded-full transition-colors',
+				'flex size-7 items-center justify-center rounded transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
 				active
-					? 'bg-background text-foreground shadow-sm'
-					: 'text-muted-foreground hover:text-foreground'
+					? 'bg-surface text-text-primary'
+					: 'text-text-muted hover:text-text-primary'
 			)}
 		>
 			{children}

@@ -8,12 +8,34 @@ import { ArrowLeft, Barcode, Check, Copy, ExternalLink } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 export default function ProductDetailsPage() {
 	const params = useParams()
 	const router = useRouter()
 	const id = Number(params.id)
+
+	// Prefer real browser history (so the catalog's filters/sort/page/view
+	// and scroll position are restored exactly as left) when we actually
+	// arrived from an internal navigation. A same-origin document.referrer
+	// plus more than one history entry is the standard, dependency-free way
+	// to tell "navigated here from within the app" apart from "opened
+	// directly" (a shared link, a new tab, a reload) - there's no browser
+	// API that exposes the previous history entry's URL otherwise. Falls
+	// back to a plain link to the catalog root when there's no usable
+	// history, rather than guessing at a query string that might be wrong.
+	const [canGoBack, setCanGoBack] = useState(false)
+
+	useEffect(() => {
+		try {
+			const cameFromSameOrigin =
+				document.referrer.length > 0 && new URL(document.referrer).origin === window.location.origin
+
+			setCanGoBack(cameFromSameOrigin && window.history.length > 1)
+		} catch {
+			setCanGoBack(false)
+		}
+	}, [])
 
 	const { data, isLoading, isError } = useProductDetails(id)
 
@@ -64,13 +86,24 @@ export default function ProductDetailsPage() {
 			<CatalogHeader />
 
 			<main className="mx-auto max-w-[1600px] px-5 py-10 md:px-8">
-				<Link
-					href="/"
-					className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
-				>
-					<ArrowLeft className="size-4" />
-					Back to catalog
-				</Link>
+				{canGoBack ? (
+					<button
+						type="button"
+						onClick={() => router.back()}
+						className="inline-flex items-center gap-2 text-sm text-text-muted transition-colors hover:text-text-primary"
+					>
+						<ArrowLeft className="size-4" aria-hidden="true" />
+						Back to catalog
+					</button>
+				) : (
+					<Link
+						href="/"
+						className="inline-flex items-center gap-2 text-sm text-text-muted transition-colors hover:text-text-primary"
+					>
+						<ArrowLeft className="size-4" aria-hidden="true" />
+						Back to catalog
+					</Link>
+				)}
 
 				<section className="mt-8 grid gap-10 lg:grid-cols-[320px_minmax(0,1fr)]">
 					<div className="relative aspect-square overflow-hidden bg-[#f6f6f6]">
