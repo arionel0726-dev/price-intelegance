@@ -103,10 +103,14 @@ export class DiscoveryStateService {
 	// upserts the candidate snapshot in one call, since these two writes
 	// must always happen together (a pending_review attempt with no
 	// corresponding candidate row would be unreviewable, and vice versa).
-	async recordAmbiguous(candidate: AmbiguousCandidateSnapshot, tx?: DbOrTx): Promise<void> {
+	// Returns the candidate row's id (Milestone 3: the caller - the
+	// discovery worker - needs it to synchronously hand the candidate to
+	// DeepseekReviewerService right after this commits, without a second
+	// lookup-by-unique-key round trip).
+	async recordAmbiguous(candidate: AmbiguousCandidateSnapshot, tx?: DbOrTx): Promise<number> {
 		const db = tx ?? this.database.db;
 
-		await db
+		const [row] = await db
 			.insert(discoveryCandidates)
 			.values({
 				productId: candidate.productId,
@@ -125,13 +129,10 @@ export class DiscoveryStateService {
 				ruleDecision: 'ambiguous',
 				ruleSignals: candidate.ruleSignals,
 
-				// AI fields stay NULL - no DeepSeek call exists yet. reviewStatus
-				// is 'pending' (not 'not_required') so the fact that this SKU is
-				// ambiguous is never lost: 'pending' + aiVerdict IS NULL means
-				// "deterministic-ambiguous, awaiting the AI milestone"; a future
-				// AI-approve-below-threshold candidate would ALSO be 'pending'
-				// but with aiVerdict NOT NULL, so the two remain distinguishable
-				// without a schema change.
+				// reviewStatus starts 'pending' - aiVerdict IS NULL means
+				// "deterministic-ambiguous, awaiting AI (or disabled)"; an
+				// AI-approve-below-threshold candidate is ALSO 'pending' but
+				// with aiVerdict NOT NULL, so the two stay distinguishable.
 				reviewStatus: 'pending'
 			})
 			.onConflictDoUpdate({
@@ -140,18 +141,56 @@ export class DiscoveryStateService {
 					discoveryCandidates.competitorId,
 					discoveryCandidates.competitorProductVariantId
 				],
+				// Milestone 3: this exact (productId, competitorId,
+				// variantId) triple can legitimately become ambiguous again
+				// after an AI reject's no_match retry window elapses (only
+				// a HUMAN reject/approve is permanent - see project notes),
+				// so a fresh ambiguous detection normally DOES reset stale
+				// AI/review state here. But if the existing row is already
+				// human-resolved ('approved' or 'rejected'), this update
+				// must be a complete no-op - that row must never be
+				// un-rejected/un-approved by a later rediscovery pass. Every
+				// field below is guarded by the same CASE so a
+				// human-resolved row is left byte-for-byte untouched; the
+				// `WHEN` branch reads the EXISTING (pre-conflict) column
+				// value via a bare column reference, which is how Postgres
+				// ON CONFLICT DO UPDATE exposes it. Selection logic upstream
+				// (discovery-targets.ts) is ALSO responsible for never
+				// routing a human-resolved pair back into a fresh search in
+				// the first place - this guard is the second, defensive
+				// layer, not the only one.
 				set: {
-					jobRunId: candidate.jobRunId ?? null,
-					snapshotTitle: candidate.snapshotTitle,
-					snapshotVariantLabel: candidate.snapshotVariantLabel,
-					snapshotVariantVolume: candidate.snapshotVariantVolume,
-					snapshotPrice: candidate.snapshotPrice,
-					snapshotUrl: candidate.snapshotUrl,
-					snapshotImageUrl: candidate.snapshotImageUrl,
-					ruleScore: candidate.ruleScore,
-					ruleSignals: candidate.ruleSignals
+					jobRunId: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.jobRunId} ELSE ${candidate.jobRunId ?? null} END`,
+					snapshotTitle: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.snapshotTitle} ELSE ${candidate.snapshotTitle} END`,
+					snapshotVariantLabel: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.snapshotVariantLabel} ELSE ${candidate.snapshotVariantLabel} END`,
+					snapshotVariantVolume: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.snapshotVariantVolume} ELSE ${candidate.snapshotVariantVolume} END`,
+					snapshotPrice: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.snapshotPrice} ELSE ${candidate.snapshotPrice} END`,
+					snapshotUrl: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.snapshotUrl} ELSE ${candidate.snapshotUrl} END`,
+					snapshotImageUrl: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.snapshotImageUrl} ELSE ${candidate.snapshotImageUrl} END`,
+					ruleScore: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.ruleScore} ELSE ${candidate.ruleScore} END`,
+					ruleSignals: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.ruleSignals} ELSE ${JSON.stringify(candidate.ruleSignals)}::jsonb END`,
+					aiVerdict: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiVerdict} ELSE NULL END`,
+					aiConfidence: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiConfidence} ELSE NULL END`,
+					aiReason: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiReason} ELSE NULL END`,
+					aiRawResponse: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiRawResponse} ELSE NULL END`,
+					aiEvaluatedAt: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiEvaluatedAt} ELSE NULL END`,
+					aiThresholdUsed: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiThresholdUsed} ELSE NULL END`,
+					aiModel: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiModel} ELSE NULL END`,
+					aiPromptTokens: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiPromptTokens} ELSE NULL END`,
+					aiCompletionTokens: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiCompletionTokens} ELSE NULL END`,
+					aiTotalTokens: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiTotalTokens} ELSE NULL END`,
+					aiLatencyMs: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiLatencyMs} ELSE NULL END`,
+					aiEstimatedCostUsd: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiEstimatedCostUsd} ELSE NULL END`,
+					aiProcessingAt: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.aiProcessingAt} ELSE NULL END`,
+					reviewStatus: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.reviewStatus} ELSE 'pending' END`,
+					reviewedAt: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.reviewedAt} ELSE NULL END`,
+					reviewedBy: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.reviewedBy} ELSE NULL END`,
+					reviewNote: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.reviewNote} ELSE NULL END`,
+					outcome: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.outcome} ELSE NULL END`,
+					resolvedAt: sql`CASE WHEN ${discoveryCandidates.reviewStatus} IN ('approved', 'rejected') THEN ${discoveryCandidates.resolvedAt} ELSE NULL END`
 				}
-			});
+			})
+			.returning({ id: discoveryCandidates.id });
 
 		await this.upsertAttempt(candidate.productId, candidate.competitorId, {
 			status: 'pending_review',
@@ -159,6 +198,8 @@ export class DiscoveryStateService {
 			retryEligibleAt: null,
 			jobRunId: candidate.jobRunId
 		}, tx);
+
+		return row!.id;
 	}
 
 	private async upsertAttempt(

@@ -10,6 +10,14 @@ import {
   type DbOrTx,
 } from '@price/db';
 
+// The three match sources this system ever writes. 'manual' is the only
+// protected tier - 'auto' and 'ai' are both "automatic", can replace each
+// other by the same margin rule, and neither can overwrite 'manual' (see
+// applyMatch below). Exported so callers (DiscoveryAiReviewService, the
+// future manual-approve endpoint) use the same literal strings rather than
+// re-typing them.
+export type MatchSource = 'auto' | 'ai' | 'manual';
+
 import { DatabaseService } from '../database/database.service';
 import { scoreCandidate } from './candidate-scoring';
 import { canonicalBrand } from './matching-normalization';
@@ -143,10 +151,11 @@ export class MatchingService {
       const key = `${group.vizajeProductId}:${group.competitorId}`;
       const existing = existingByKey.get(key);
 
-      const outcome = await this.applyAutoMatch(
+      const outcome = await this.applyMatch(
         group.vizajeProductId,
         candidate.variantId,
         candidate.score,
+        'auto',
         existing,
       );
 
@@ -169,15 +178,26 @@ export class MatchingService {
   }
 
   // Single-pair match-persistence decision, shared by the bulk persistAuto()
-  // loop above and persistSingleAutoMatch() below (used by targeted-search
-  // sync, which scores and persists ONE Vizaje/competitor pair at a time
-  // instead of recomputing the whole catalog). The rules themselves -
-  // manual always wins, same-variant score refresh, replace-only-if-margin-
-  // clears - are unchanged; this only makes them callable from one place.
-  private async applyAutoMatch(
+  // loop above and persistMatch()/persistSingleAutoMatch() below. The
+  // rules - manual always wins, same-variant score refresh, replace-only-
+  // if-margin-clears - are unchanged from the pre-Milestone-3 'auto'-only
+  // version; this only generalizes WHICH source is being written, so 'ai'
+  // can share the exact same precedence instead of a second
+  // reimplementation.
+  //
+  // Milestone 3 fix: the previous manual-protection check was
+  // `existing.source !== 'auto'`, which (correctly, by accident) protected
+  // 'manual' but would ALSO have treated a pre-existing 'ai' match as
+  // untouchable by a later 'auto' or 'ai' write - the opposite of "auto/ai
+  // both automatic tier, can replace each other by margin rule". Checking
+  // for 'manual' explicitly is what actually implements that tier
+  // distinction; 'auto' vs 'ai' never matters to this function, only
+  // "automatic vs manual" does.
+  private async applyMatch(
     vizajeProductId: number,
     variantId: number,
     score: number,
+    source: MatchSource,
     existing:
       | { matchId: number; variantId: number; source: string; score: number | null }
       | undefined,
@@ -191,28 +211,31 @@ export class MatchingService {
         .values({
           productId: vizajeProductId,
           competitorProductVariantId: variantId,
-          source: 'auto',
+          source,
           score,
         })
         .onConflictDoUpdate({
           target: [matches.productId, matches.competitorProductVariantId],
-          set: { score, source: 'auto' },
+          set: { score, source },
         });
 
       return 'inserted';
     }
 
-    // Manual (or any future non-auto source) always wins - never touched by
-    // the automatic sync, regardless of variant agreement.
-    if (existing.source !== 'auto') {
+    // Manual always wins - never touched by an automatic (auto/ai) write,
+    // regardless of variant agreement. A manual write itself always
+    // proceeds below regardless of what currently exists (a human
+    // approving overrides any prior automatic match outright - see the
+    // AI Review approve endpoint).
+    if (existing.source === 'manual' && source !== 'manual') {
       return 'skippedManual';
     }
 
     if (existing.variantId === variantId) {
-      if (existing.score !== score) {
+      if (existing.score !== score || existing.source !== source) {
         await db
           .update(matches)
-          .set({ score })
+          .set({ score, source })
           .where(eq(matches.id, existing.matchId));
 
         return 'updated';
@@ -222,15 +245,17 @@ export class MatchingService {
     }
 
     // A different variant is currently matched for this Vizaje product +
-    // competitor. Replace only if clearly better (same margin bar used for
-    // the tie-break rule); otherwise leave the existing match alone rather
-    // than oscillate between near-equal candidates.
+    // competitor. A manual write always replaces outright; an automatic
+    // (auto/ai) write replaces only if clearly better (same margin bar
+    // used for the tie-break rule) - otherwise leave the existing match
+    // alone rather than oscillate between near-equal candidates.
     const existingScore = existing.score ?? 0;
+    const clearsMargin = source === 'manual' || score - existingScore >= AUTO_MARGIN_MIN_POINTS;
 
-    if (score - existingScore >= AUTO_MARGIN_MIN_POINTS) {
+    if (clearsMargin) {
       await db
         .update(matches)
-        .set({ competitorProductVariantId: variantId, score, source: 'auto' })
+        .set({ competitorProductVariantId: variantId, score, source })
         .where(eq(matches.id, existing.matchId));
 
       return 'updated';
@@ -239,16 +264,35 @@ export class MatchingService {
     return 'conflict';
   }
 
-  // Persists exactly one Vizaje product <-> competitor match, using the
-  // exact same rules as persistAuto() (see applyAutoMatch above), without
-  // recomputing/rescoring the rest of the catalog. Used by targeted-search
-  // sync: score a single freshly-parsed candidate, decide AUTO, then persist
-  // just that one pair.
-  // `tx` (optional) lets a caller join this write to its own transaction -
-  // see DiscoveryWorkerService/*SkuDiscoveryService's AUTO-outcome
-  // handling, which needs this `matches` insert/update to commit
-  // atomically with the matched outcome's job_events row (counter/
-  // outcome idempotency - see project notes).
+  // Persists exactly one Vizaje product <-> competitor match for ANY
+  // source ('auto' | 'ai' | 'manual') - see applyMatch above for the
+  // shared precedence rule. `tx` (optional) lets a caller join this write
+  // to its own transaction - see DiscoveryWorkerService/*SkuDiscoveryService's
+  // AUTO-outcome handling and DiscoveryAiReviewService's AI-approve path,
+  // both of which need this `matches` write to commit atomically with
+  // their own job_events/discovery_candidates updates (counter/outcome
+  // idempotency - see project notes).
+  async persistMatch(
+    vizajeProductId: number,
+    competitorId: number,
+    variantId: number,
+    score: number,
+    source: MatchSource,
+    tx?: DbOrTx,
+  ): Promise<{
+    outcome: 'inserted' | 'updated' | 'unchanged' | 'conflict' | 'skippedManual';
+  }> {
+    const existingByKey = await this.loadExistingMatchesByProductCompetitor(tx);
+    const existing = existingByKey.get(`${vizajeProductId}:${competitorId}`);
+
+    const outcome = await this.applyMatch(vizajeProductId, variantId, score, source, existing, tx);
+
+    return { outcome };
+  }
+
+  // Unchanged external signature (every pre-Milestone-3 call site keeps
+  // working untouched) - now a thin 'auto'-sourced wrapper over
+  // persistMatch().
   async persistSingleAutoMatch(
     vizajeProductId: number,
     competitorId: number,
@@ -258,12 +302,7 @@ export class MatchingService {
   ): Promise<{
     outcome: 'inserted' | 'updated' | 'unchanged' | 'conflict' | 'skippedManual';
   }> {
-    const existingByKey = await this.loadExistingMatchesByProductCompetitor(tx);
-    const existing = existingByKey.get(`${vizajeProductId}:${competitorId}`);
-
-    const outcome = await this.applyAutoMatch(vizajeProductId, variantId, score, existing, tx);
-
-    return { outcome };
+    return this.persistMatch(vizajeProductId, competitorId, variantId, score, 'auto', tx);
   }
 
   private async loadExistingMatchesByProductCompetitor(

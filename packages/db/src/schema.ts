@@ -429,6 +429,29 @@ export const discoveryCandidates = pgTable(
 		aiEvaluatedAt: timestamp('ai_evaluated_at'),
 		aiThresholdUsed: numeric('ai_threshold_used', { precision: 3, scale: 2 }),
 
+		// Milestone 3 - usage/cost telemetry, captured per DeepSeek call when
+		// the provider returns them. All nullable: never populated for a
+		// candidate AI never actually evaluated (disabled, or a parse/
+		// network failure before any usage was returned).
+		aiModel: text('ai_model'),
+		aiPromptTokens: integer('ai_prompt_tokens'),
+		aiCompletionTokens: integer('ai_completion_tokens'),
+		aiTotalTokens: integer('ai_total_tokens'),
+		aiLatencyMs: integer('ai_latency_ms'),
+		// Estimated only - derived from a configurable price-per-token
+		// constant (see ai/deepseek-pricing.ts), never a billed figure.
+		aiEstimatedCostUsd: numeric('ai_estimated_cost_usd', { precision: 10, scale: 6 }),
+
+		// Claim/lease marker for DiscoveryAiReviewService.processPendingBatch()
+		// - same shape as job_runs.heartbeatAt: set when a batch run claims
+		// this row, cleared when that run reaches a terminal outcome for it
+		// (resolved OR left pending) so the row is immediately reclaimable
+		// again; a lease older than AI_REVIEW_PROCESSING_LEASE_MS is treated
+		// as abandoned (a crashed/killed batch run) and reclaimable too.
+		// NULL for every row the synchronous in-job AI path produces -
+		// batch claiming only matters for the out-of-band processor.
+		aiProcessingAt: timestamp('ai_processing_at'),
+
 		reviewStatus: text('review_status').notNull().default('not_required'),
 		reviewedAt: timestamp('reviewed_at'),
 		reviewedBy: text('reviewed_by'),
@@ -456,7 +479,13 @@ export const discoveryCandidates = pgTable(
 		index('discovery_candidates_pending_idx')
 			.on(table.competitorId)
 			.where(sql`${table.reviewStatus} = 'pending'`),
-		index('discovery_candidates_job_run_idx').on(table.jobRunId)
+		index('discovery_candidates_job_run_idx').on(table.jobRunId),
+		// Milestone 3 - the exact predicate DiscoveryAiReviewService.
+		// processPendingBatch() claims against (unevaluated-pending rows,
+		// oldest first via id).
+		index('discovery_candidates_ai_claim_idx')
+			.on(table.id)
+			.where(sql`${table.reviewStatus} = 'pending' AND ${table.aiVerdict} IS NULL`)
 	]
 )
 

@@ -11,6 +11,21 @@ type ApiFetchOptions = RequestInit & {
 	params?: Record<string, string | number | boolean | undefined>
 }
 
+// Carries the HTTP status (and, when present, the Nest exception's own
+// `message`) so a caller can distinguish e.g. a 409 "already resolved"
+// conflict from a generic failure, instead of every non-2xx response
+// collapsing into the same plain Error - see the AI Review feature's
+// approve/reject mutations for the first consumer of this.
+export class ApiError extends Error {
+	constructor(
+		public readonly status: number,
+		message: string
+	) {
+		super(message)
+		this.name = 'ApiError'
+	}
+}
+
 export async function apiFetch<T>(
 	path: string,
 	options: ApiFetchOptions = {}
@@ -54,7 +69,16 @@ export async function apiFetch<T>(
 	}
 
 	if (!response.ok) {
-		throw new Error(`API request failed: ${response.status}`)
+		// Nest's exception filter returns { statusCode, message, error } -
+		// read it best-effort (a non-JSON or empty body just falls back to
+		// the generic message, never throws from inside this catch path).
+		const message = await response
+			.clone()
+			.json()
+			.then((body: { message?: string }) => body?.message)
+			.catch(() => undefined)
+
+		throw new ApiError(response.status, message ?? `API request failed: ${response.status}`)
 	}
 
 	return response.json() as Promise<T>

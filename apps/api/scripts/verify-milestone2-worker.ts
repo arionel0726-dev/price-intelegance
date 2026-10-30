@@ -26,6 +26,8 @@ import { SkuBudget, type SkuOutcome } from '../src/competitors/sku-discovery.typ
 import { DatabaseService } from '../src/database/database.service';
 import { DiscoveryJobsService } from '../src/jobs/discovery-jobs.service';
 import { DiscoveryWorkerService } from '../src/jobs/discovery-worker.service';
+import type { AppSettingsService } from '../src/policy/app-settings.service';
+import type { DiscoveryAiReviewService } from '../src/ai/discovery-ai-review.service';
 
 // Milestone 2 (DB-backed discovery job execution) integration verification
 // - same real-Postgres, synthetic-prefix, cleaned-up-in-finally convention
@@ -155,6 +157,15 @@ async function main() {
   const persistence = new CompetitorPersistenceService(database);
   const discoveryState = new DiscoveryStateService(database);
   const jobsService = new DiscoveryJobsService(database, persistence);
+  // Milestone 3 added two more DiscoveryWorkerService constructor params.
+  // None of the Milestone 2 worker-mechanics tests below exercise AI
+  // review - ai.enabled stays false in this script's app_settings row
+  // (the Milestone 1 seed default), so this stub's getAiEnabled() always
+  // resolving false is enough for the worker's 'ambiguous' case to short-
+  // circuit before ever touching aiReview - see
+  // verify-milestone3-ai-review.ts for the actual AI-path tests.
+  const noAiSettings = { getAiEnabled: async () => false } as unknown as AppSettingsService;
+  const noAiReview = {} as unknown as DiscoveryAiReviewService;
 
   const insertedProductIds: number[] = [];
   const insertedJobRunIds: number[] = [];
@@ -255,6 +266,8 @@ async function main() {
       fakeMakeupInert as never,
       fakeOvicoNoMatch as never,
       discoveryState,
+      noAiSettings,
+      noAiReview,
     ) as unknown as {
       claim(id: number): Promise<typeof job1 | null>;
       reconcile(): Promise<void>;
@@ -282,6 +295,8 @@ async function main() {
       fakeMakeupInert as never,
       slowFakeOvico as never,
       discoveryState,
+      noAiSettings,
+      noAiReview,
     ) as unknown as typeof worker;
 
     const [beforeHeartbeat] = await database.db.select({ heartbeatAt: jobRuns.heartbeatAt }).from(jobRuns).where(eq(jobRuns.id, job1.id));
@@ -343,7 +358,7 @@ async function main() {
     });
 
     const claimed2 = await worker.claim(job2.id);
-    const worker2 = new DiscoveryWorkerService(database, jobsService, fakeMakeupInert as never, mixedOvico as never, discoveryState) as unknown as typeof worker;
+    const worker2 = new DiscoveryWorkerService(database, jobsService, fakeMakeupInert as never, mixedOvico as never, discoveryState, noAiSettings, noAiReview) as unknown as typeof worker;
     await worker2.runJob(claimed2!);
 
     const [job2Row] = await database.db.select().from(jobRuns).where(eq(jobRuns.id, job2.id));
@@ -374,7 +389,7 @@ async function main() {
     const neverCalledOvico = new FakeOvicoSkuDiscoveryService(database, discoveryState, async () => {
       throw new Error('should never be called - brand filter matches zero products');
     });
-    const worker3 = new DiscoveryWorkerService(database, jobsService, fakeMakeupInert as never, neverCalledOvico as never, discoveryState) as unknown as typeof worker;
+    const worker3 = new DiscoveryWorkerService(database, jobsService, fakeMakeupInert as never, neverCalledOvico as never, discoveryState, noAiSettings, noAiReview) as unknown as typeof worker;
     await worker3.runJob(claimed3!);
     const [job3Row] = await database.db.select().from(jobRuns).where(eq(jobRuns.id, job3.id));
     check('job3 completed with pool_exhausted', job3Row?.status === 'completed' && job3Row?.stopReason === 'pool_exhausted');
@@ -402,7 +417,7 @@ async function main() {
       }
       return { kind: 'no_match', parseSuccesses: 0 };
     });
-    const worker4 = new DiscoveryWorkerService(database, jobsService, fakeMakeupInert as never, stoppingOvico as never, discoveryState) as unknown as typeof worker;
+    const worker4 = new DiscoveryWorkerService(database, jobsService, fakeMakeupInert as never, stoppingOvico as never, discoveryState, noAiSettings, noAiReview) as unknown as typeof worker;
     await worker4.runJob(claimed4!);
 
     const [job4Row] = await database.db.select().from(jobRuns).where(eq(jobRuns.id, job4.id));
@@ -525,7 +540,7 @@ async function main() {
       makeupSearchCall += 1;
       return makeupSearchCall === 1 ? 3 : 0;
     });
-    const worker9 = new DiscoveryWorkerService(database, jobsService, cooldownMakeup as never, fakeOvicoNoMatch as never, discoveryState) as unknown as typeof worker;
+    const worker9 = new DiscoveryWorkerService(database, jobsService, cooldownMakeup as never, fakeOvicoNoMatch as never, discoveryState, noAiSettings, noAiReview) as unknown as typeof worker;
     await worker9.runJob(claimed9!);
     const [job9Row] = await database.db.select().from(jobRuns).where(eq(jobRuns.id, job9.id));
     check(
@@ -587,6 +602,8 @@ async function main() {
       fakeMakeupInert as never,
       fakeOvicoNoMatch as never,
       discoveryState,
+      noAiSettings,
+      noAiReview,
     ) as unknown as {
       recomputeCounters(jobId: number): Promise<{
         processedCount: number;
@@ -713,7 +730,7 @@ async function main() {
     const probeTarget: DiscoveryTarget = { id: productRows[1]!.id, brand: BRAND, name: 'probe target', volume: null, color: null };
 
     const throwingMakeup = new FakeMakeupSkuDiscoveryService(database, () => 'throw');
-    const workerThrow = new DiscoveryWorkerService(database, jobsService, throwingMakeup as never, fakeOvicoNoMatch as never, discoveryState) as unknown as {
+    const workerThrow = new DiscoveryWorkerService(database, jobsService, throwingMakeup as never, fakeOvicoNoMatch as never, discoveryState, noAiSettings, noAiReview) as unknown as {
       runMakeupOne(target: DiscoveryTarget, competitor: { id: number }, jobRunId: number, budget: SkuBudget, cooldownTracker: MakeupCooldownTracker): Promise<SkuOutcome>;
     };
     const outcomeFromRequestFailure = await workerThrow.runMakeupOne(probeTarget, { id: makeupId }, job10.id, new SkuBudget(60), new MakeupCooldownTracker());
@@ -723,7 +740,7 @@ async function main() {
     );
 
     const cooldownOnlyMakeup = new FakeMakeupSkuDiscoveryService(database, () => 0);
-    const workerCooldown = new DiscoveryWorkerService(database, jobsService, cooldownOnlyMakeup as never, fakeOvicoNoMatch as never, discoveryState) as unknown as typeof workerThrow;
+    const workerCooldown = new DiscoveryWorkerService(database, jobsService, cooldownOnlyMakeup as never, fakeOvicoNoMatch as never, discoveryState, noAiSettings, noAiReview) as unknown as typeof workerThrow;
     // Prime the sliding window with two prior empties (threshold is
     // overridden to 2 via MAKEUP_COOLDOWN_THRESHOLD - see header) so the
     // THIRD empty result (the one runMakeupOne itself records) completes
@@ -765,7 +782,7 @@ async function main() {
       // deferred/search-error here is the explicit throw.
       return call12 % 3 === 0 ? 'throw' : 2;
     });
-    const worker12 = new DiscoveryWorkerService(database, jobsService, mixedFailureMakeup as never, fakeOvicoNoMatch as never, discoveryState) as unknown as typeof worker;
+    const worker12 = new DiscoveryWorkerService(database, jobsService, mixedFailureMakeup as never, fakeOvicoNoMatch as never, discoveryState, noAiSettings, noAiReview) as unknown as typeof worker;
     await worker12.runJob(claimed12!);
 
     const [job12Row] = await database.db.select().from(jobRuns).where(eq(jobRuns.id, job12.id));

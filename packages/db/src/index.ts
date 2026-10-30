@@ -14,6 +14,7 @@ export type DbOrTx = Database | Parameters<Parameters<Database['transaction']>[0
 export {
 	and,
 	asc,
+	avg,
 	count,
 	countDistinct,
 	desc,
@@ -31,5 +32,6 @@ export {
 	notInArray,
 	or,
 	sql,
+	sum,
 	type SQL
 } from 'drizzle-orm'

@@ -22,7 +22,11 @@ export type SkuOutcome =
 			price: number | null;
 			parseSuccesses: number;
 	  }
-	| { kind: 'ambiguous'; score: number; parseSuccesses: number }
+	// candidateId is the discovery_candidates row id just written - the
+	// Milestone 3 AI review path needs it to evaluate this exact candidate
+	// without a second lookup-by-unique-key round trip (see
+	// DiscoveryWorkerService.runJob's 'ambiguous' handling).
+	| { kind: 'ambiguous'; score: number; parseSuccesses: number; candidateId: number }
 	| { kind: 'no_match'; parseSuccesses: number }
 	| { kind: 'error'; reason: string; parseSuccesses: number }
 	// Only ever produced by the MAKEUP path - a batch/cooldown-level signal,

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 
+import { AiModule } from './ai/ai.module';
 import { AppController } from './app.controller';
 import { AuthModule } from './auth/auth.module';
 import { CompetitorsModule } from './competitors/competitors.module';
@@ -26,6 +27,7 @@ import { VizajeSyncModule } from './vizaje/vizaje-sync.module';
     MatchingModule,
     VizajeSyncModule,
     JobsModule,
+    AiModule,
   ],
 })
 export class AppModule {}

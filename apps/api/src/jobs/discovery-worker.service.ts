@@ -4,6 +4,7 @@ import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common'
 import { Cron, Interval } from '@nestjs/schedule';
 import { and, asc, competitors, count, eq, inArray, isNull, jobEvents, type JobRun, jobRuns, lt, or } from '@price/db';
 
+import { DiscoveryAiReviewService } from '../ai/discovery-ai-review.service';
 import { DiscoveryStateService } from '../competitors/discovery-state.service';
 import { MakeupBatchPacer } from '../competitors/makeup-batch-pacer';
 import { MakeupCooldownTracker } from '../competitors/makeup-cooldown-tracker';
@@ -21,6 +22,7 @@ import { OvicoSkuDiscoveryService } from '../competitors/ovico-sku-discovery.ser
 import { selectNextContinuousTarget, type DiscoveryTarget } from '../competitors/discovery-targets';
 import { SkuBudget, type SkuOutcome } from '../competitors/sku-discovery.types';
 import { DatabaseService } from '../database/database.service';
+import { AppSettingsService } from '../policy/app-settings.service';
 import type { CompetitorDomain } from '../policy/policy-precedence';
 import { DiscoveryJobsService } from './discovery-jobs.service';
 import type { DiscoveryJobParams } from './discovery-jobs.types';
@@ -60,6 +62,8 @@ export class DiscoveryWorkerService implements OnApplicationBootstrap {
     private readonly makeupSku: MakeupSkuDiscoveryService,
     private readonly ovicoSku: OvicoSkuDiscoveryService,
     private readonly discoveryState: DiscoveryStateService,
+    private readonly appSettings: AppSettingsService,
+    private readonly aiReview: DiscoveryAiReviewService,
   ) {}
 
   // Recovery runs once at process start, before the first poll tick could
@@ -218,6 +222,7 @@ export class DiscoveryWorkerService implements OnApplicationBootstrap {
   private async recomputeCounters(jobId: number): Promise<{
     processedCount: number;
     autoCount: number;
+    aiAutoCount: number;
     aiReviewCount: number;
     noMatchCount: number;
     errorCount: number;
@@ -232,6 +237,8 @@ export class DiscoveryWorkerService implements OnApplicationBootstrap {
           inArray(jobEvents.eventType, [
             'product_auto_matched',
             'product_pending_review',
+            'product_ai_auto_matched',
+            'product_ai_rejected',
             'product_no_match',
             'product_error',
           ]),
@@ -241,17 +248,43 @@ export class DiscoveryWorkerService implements OnApplicationBootstrap {
 
     const totals = new Map(rows.map(row => [row.eventType, Number(row.total)]));
     const autoCount = totals.get('product_auto_matched') ?? 0;
-    const aiReviewCount = totals.get('product_pending_review') ?? 0;
-    const noMatchCount = totals.get('product_no_match') ?? 0;
+    const aiAutoCount = totals.get('product_ai_auto_matched') ?? 0;
+    const aiRejectedCount = totals.get('product_ai_rejected') ?? 0;
+    const pendingReviewRaised = totals.get('product_pending_review') ?? 0;
+    // Milestone 3 counter/outcome double-count fix (see project notes -
+    // this is exactly the trap flagged in the M2 review): the
+    // deterministic-ambiguous moment ALWAYS emits product_pending_review,
+    // unconditionally, BEFORE AI (if enabled) runs. If AI then resolves
+    // that SAME candidate synchronously in this same job pass - either
+    // auto-matching it (product_ai_auto_matched) or rejecting it
+    // (product_ai_rejected) - counting product_pending_review on its own
+    // would double-count that one candidate: once as "pending review",
+    // and again as "ai auto matched"/"no match" via its own event type.
+    // Subtracting the two AI-resolution event counts here nets out to
+    // exactly the candidates STILL actually awaiting human review after
+    // this job's own AI pass - never negative, since product_ai_auto_matched/
+    // product_ai_rejected can only ever follow a product_pending_review
+    // for the SAME candidate (DiscoveryWorkerService only ever calls AI
+    // review right after emitting it, never independently). If AI is
+    // disabled (or never runs for this job), both subtracted counts are
+    // 0 and aiReviewCount is exactly the raw product_pending_review
+    // count, unchanged from pre-Milestone-3 behavior.
+    const aiReviewCount = pendingReviewRaised - aiAutoCount - aiRejectedCount;
+    // An AI reject IS a no_match resolution in durable-state terms (see
+    // DiscoveryAiReviewService.applyVerdict, which calls
+    // recordNoMatch for exactly this reason) - counted here so
+    // processedCount's sum below stays exactly 1 per candidate
+    // regardless of which path resolved it.
+    const noMatchCount = (totals.get('product_no_match') ?? 0) + aiRejectedCount;
     const errorCount = totals.get('product_error') ?? 0;
     // recordError() (called from inside the sku-discovery services)
     // always schedules a retryEligibleAt window - that IS the retry being
     // counted, so retryCount tracks errorCount exactly, same as before
     // this fix.
     const retryCount = errorCount;
-    const processedCount = autoCount + aiReviewCount + noMatchCount + errorCount;
+    const processedCount = autoCount + aiAutoCount + aiReviewCount + noMatchCount + errorCount;
 
-    return { processedCount, autoCount, aiReviewCount, noMatchCount, errorCount, retryCount };
+    return { processedCount, autoCount, aiAutoCount, aiReviewCount, noMatchCount, errorCount, retryCount };
   }
 
   private async persistRecomputedCounters(jobId: number) {
@@ -282,7 +315,7 @@ export class DiscoveryWorkerService implements OnApplicationBootstrap {
     // committed but before the job_runs row was updated, job.processedCount
     // would under-report that SKU forever; recomputing here picks it up
     // the moment this job is reclaimed.
-    let { processedCount, autoCount, aiReviewCount, noMatchCount, errorCount, retryCount } =
+    let { processedCount, autoCount, aiAutoCount, aiReviewCount, noMatchCount, errorCount, retryCount } =
       await this.recomputeCounters(job.id);
 
     // In-memory only, scoped to THIS execution attempt - deliberately not
@@ -386,6 +419,47 @@ export class DiscoveryWorkerService implements OnApplicationBootstrap {
             if (outcome.wasSearchError) searchErrorsSoFar += 1;
             await this.jobs.emitEvent(job.id, 'product_deferred', target.id, { reason: outcome.reason });
             break;
+          case 'ambiguous':
+            // Milestone 3: evaluate the fresh ambiguous candidate against
+            // DeepSeek right here, synchronously, in the SAME job pass -
+            // covers newly produced candidates with no new
+            // infrastructure (see DiscoveryAiReviewService's doc comment
+            // for the out-of-band batch path that covers pre-existing
+            // candidates instead). product_pending_review was ALREADY
+            // emitted, unconditionally, inside scoreAndPersist/
+            // processOne above. DiscoveryAiReviewService.applyVerdict()
+            // itself now emits the SECOND event (product_ai_auto_matched/
+            // product_ai_rejected) when it resolves a candidate - inside
+            // the SAME transaction as the match/candidate/attempts
+            // writes, and keyed to candidate.jobRunId rather than this
+            // job's own id, so an out-of-band processPendingBatch() call
+            // resolving this exact candidate LATER (after this job has
+            // long finished) still lands the event against the job it
+            // actually belongs to. Nothing to emit here anymore -
+            // recomputeCounters() subtracts that event back out of
+            // aiReviewCount so the candidate is counted exactly once
+            // either way (disabled, still-pending-after-AI, or
+            // resolved-by-AI, synchronously or later) - see that
+            // function's doc comment for the exact arithmetic.
+            try {
+              await this.aiReview.evaluateCandidate(outcome.candidateId);
+              // 'ai_auto_matched'/'rejected' already wrote their own event
+              // above; 'pending_review' (approve below threshold),
+              // 'unavailable' (disabled/no key), and 'error_stayed_pending'
+              // all leave the candidate exactly as product_pending_review
+              // already left it - nothing further to do either way.
+            } catch (error) {
+              // AI review must never fail discovery itself - log and
+              // leave the candidate pending (DiscoveryAiReviewService's
+              // own internal failure modes already return structured
+              // results rather than throwing; this only guards against a
+              // genuinely unexpected error, e.g. the hard-conflict
+              // invariant assertion).
+              this.logger.error(
+                `AI review failed for discovery_candidates ${outcome.candidateId} (job ${job.id}): ${String(error)}`,
+              );
+            }
+            break;
           default:
             break;
         }
@@ -397,7 +471,7 @@ export class DiscoveryWorkerService implements OnApplicationBootstrap {
         // (no job_events row of its own feeds the counters), so this is
         // a no-op write for that branch - still safe and cheap to run
         // every iteration.
-        ({ processedCount, autoCount, aiReviewCount, noMatchCount, errorCount, retryCount } =
+        ({ processedCount, autoCount, aiAutoCount, aiReviewCount, noMatchCount, errorCount, retryCount } =
           await this.persistRecomputedCounters(job.id));
 
         const safetyBreach = evaluateSafetyLimits({

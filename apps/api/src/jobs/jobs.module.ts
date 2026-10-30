@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 
+import { AiModule } from '../ai/ai.module';
 import { CompetitorsModule } from '../competitors/competitors.module';
+import { PolicyModule } from '../policy/policy.module';
 import { VizajeSyncModule } from '../vizaje/vizaje-sync.module';
 import { DiscoveryJobsController } from './discovery-jobs.controller';
 import { DiscoveryJobsService } from './discovery-jobs.service';
@@ -27,7 +29,7 @@ import { VizajeMasterSyncJob } from './vizaje-master-sync.job';
 // for the same work, since DiscoveryWorkerService never consults it; see
 // project notes on when it becomes safe to remove.
 @Module({
-  imports: [CompetitorsModule, VizajeSyncModule],
+  imports: [CompetitorsModule, VizajeSyncModule, AiModule, PolicyModule],
   controllers: [DiscoveryJobsController],
   providers: [
     JobLockService,

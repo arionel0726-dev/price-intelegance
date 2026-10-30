@@ -38,21 +38,21 @@ export class OvicoSkuDiscoveryService {
 	// rationale - identical helper, duplicated rather than shared because
 	// the two services have no common base class and this is the only
 	// piece they'd otherwise share.
-	private async recordTerminalOutcome(
-		write: (tx: DbOrTx) => Promise<void>,
+	private async recordTerminalOutcome<T>(
+		write: (tx: DbOrTx) => Promise<T>,
 		jobRunId: number | null,
 		productId: number,
 		eventType: string,
 		data: Record<string, unknown>,
-	): Promise<void> {
+	): Promise<T> {
 		if (jobRunId == null) {
-			await write(this.database.db);
-			return;
+			return write(this.database.db);
 		}
 
-		await this.database.db.transaction(async tx => {
-			await write(tx);
+		return this.database.db.transaction(async tx => {
+			const result = await write(tx);
 			await tx.insert(jobEvents).values({ jobRunId, productId, eventType, data, message: null });
+			return result;
 		});
 	}
 
@@ -217,7 +217,7 @@ export class OvicoSkuDiscoveryService {
 					return { kind: 'error', reason: 'persist_error_missing_variant', parseSuccesses };
 				}
 
-				await this.recordTerminalOutcome(
+				const candidateId = await this.recordTerminalOutcome(
 					tx => this.discoveryState.recordAmbiguous({
 						productId: vizaje.id,
 						competitorId: competitor.id,
@@ -234,7 +234,7 @@ export class OvicoSkuDiscoveryService {
 					}, tx),
 					jobRunId, vizaje.id, 'product_pending_review', { score: bestAmbiguous.result.score },
 				);
-				return { kind: 'ambiguous', score: bestAmbiguous.result.score, parseSuccesses };
+				return { kind: 'ambiguous', score: bestAmbiguous.result.score, parseSuccesses, candidateId };
 			} catch (error) {
 				this.logger.warn(`candidate persist failed for vizaje id=${vizaje.id}: ${String(error)}`);
 				await this.recordTerminalOutcome(
