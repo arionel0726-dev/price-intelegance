@@ -34,8 +34,16 @@ export class DiscoveryJobsController {
   }
 
   @Get()
-  list(@Query('page') page?: string, @Query('limit') limit?: string) {
-    return this.jobs.list(page ? Number(page) : 1, limit ? Number(limit) : 20);
+  list(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('competitor') competitor?: DiscoveryCompetitorSlug,
+    @Query('status') status?: string,
+  ) {
+    return this.jobs.list(page ? Number(page) : 1, limit ? Number(limit) : 20, {
+      competitor,
+      statuses: status ? status.split(',') : undefined,
+    });
   }
 
   @Get(':id')

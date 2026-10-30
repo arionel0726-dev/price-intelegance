@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, count, desc, eq, inArray, jobEvents, jobRuns, type JobRun } from '@price/db';
+import { and, asc, competitors, count, desc, eq, inArray, jobEvents, jobRuns, type JobRun } from '@price/db';
 
 import { CompetitorPersistenceService } from '../competitors/competitor-persistence.service';
 import { DatabaseService } from '../database/database.service';
@@ -16,8 +16,26 @@ const COMPETITOR_NAME: Record<DiscoveryCompetitorSlug, string> = {
 	ovico: 'OVICO',
 };
 
+// Reverse of DISCOVERY_COMPETITOR_DOMAINS - lets a job_runs row (which only
+// stores competitorId) be resolved back to the stable UI-facing slug the
+// enqueue form used, without a side-effecting getOrCreateCompetitor lookup.
+const DOMAIN_TO_SLUG: Record<string, DiscoveryCompetitorSlug> = Object.fromEntries(
+	Object.entries(DISCOVERY_COMPETITOR_DOMAINS).map(([slug, domain]) => [domain, slug as DiscoveryCompetitorSlug]),
+);
+
+export type JobRunWithCompetitor = JobRun & {
+	competitorSlug: DiscoveryCompetitorSlug | null;
+	competitorName: string;
+};
+
 const ACTIVE_STATUSES = ['queued', 'running', 'stopping'] as const;
 const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'] as const;
+const ALL_STATUSES = [...ACTIVE_STATUSES, ...TERMINAL_STATUSES] as const;
+
+export type JobListFilters = {
+	competitor?: DiscoveryCompetitorSlug;
+	statuses?: string[];
+};
 
 // Postgres unique_violation - see job_runs_active_per_competitor in
 // packages/db/src/schema.ts. The `postgres` driver attaches `code` to the
@@ -93,21 +111,91 @@ export class DiscoveryJobsService {
 		}
 	}
 
-	async list(page: number, limit: number): Promise<{ items: JobRun[]; page: number; limit: number; total: number }> {
+	// Resolves a UI-facing competitor slug to its competitors.id, read-only
+	// (unlike CompetitorPersistenceService.getOrCreateCompetitor) - a GET
+	// endpoint must never create rows as a side effect of being filtered.
+	// Returns undefined for a slug whose competitor row doesn't exist yet
+	// (nothing has ever been enqueued for it), which callers treat as "no
+	// matching jobs" rather than an error.
+	private async resolveCompetitorId(slug: DiscoveryCompetitorSlug): Promise<number | undefined> {
+		const domain = DISCOVERY_COMPETITOR_DOMAINS[slug];
+		const [row] = await this.database.db.select({ id: competitors.id }).from(competitors).where(eq(competitors.domain, domain));
+		return row?.id;
+	}
+
+	private decorate(row: JobRun & { competitorDomain: string | null; competitorDbName: string | null }): JobRunWithCompetitor {
+		const { competitorDomain, competitorDbName, ...jobRun } = row;
+		return {
+			...jobRun,
+			competitorSlug: competitorDomain ? DOMAIN_TO_SLUG[competitorDomain] ?? null : null,
+			competitorName: competitorDbName ?? 'Unknown',
+		};
+	}
+
+	// Additive filtering (Milestone 4 Jobs UI) - the existing list() only
+	// ever supported page/limit. A competitor can have at most one
+	// queued/running/stopping job at a time (job_runs_active_per_competitor),
+	// but with two competitors and long-running continuous jobs, an active
+	// job's id is NOT reliably near the top of an unfiltered page - the Jobs
+	// UI's "active job per competitor" panel and its history filters both
+	// need a real server-side filter, not a client-side scan of one page.
+	async list(
+		page: number,
+		limit: number,
+		filters: JobListFilters = {},
+	): Promise<{ items: JobRunWithCompetitor[]; page: number; limit: number; total: number }> {
 		const offset = (Math.max(1, page) - 1) * limit;
 
-		const [items, [{ total }]] = await Promise.all([
-			this.database.db.select().from(jobRuns).orderBy(desc(jobRuns.id)).limit(limit).offset(offset),
-			this.database.db.select({ total: count() }).from(jobRuns),
+		const conditions = [];
+		if (filters.competitor) {
+			const competitorId = await this.resolveCompetitorId(filters.competitor);
+			if (competitorId === undefined) {
+				return { items: [], page: Math.max(1, page), limit, total: 0 };
+			}
+			conditions.push(eq(jobRuns.competitorId, competitorId));
+		}
+		if (filters.statuses && filters.statuses.length > 0) {
+			const valid = filters.statuses.filter((s): s is (typeof ALL_STATUSES)[number] =>
+				(ALL_STATUSES as readonly string[]).includes(s),
+			);
+			if (valid.length === 0) return { items: [], page: Math.max(1, page), limit, total: 0 };
+			conditions.push(inArray(jobRuns.status, valid));
+		}
+		const where = conditions.length > 0 ? and(...conditions) : undefined;
+
+		const [rows, [{ total }]] = await Promise.all([
+			this.database.db
+				.select({
+					jobRuns,
+					competitorDomain: competitors.domain,
+					competitorDbName: competitors.name,
+				})
+				.from(jobRuns)
+				.leftJoin(competitors, eq(jobRuns.competitorId, competitors.id))
+				.where(where)
+				.orderBy(desc(jobRuns.id))
+				.limit(limit)
+				.offset(offset),
+			this.database.db.select({ total: count() }).from(jobRuns).where(where),
 		]);
+
+		const items = rows.map(r => this.decorate({ ...r.jobRuns, competitorDomain: r.competitorDomain, competitorDbName: r.competitorDbName }));
 
 		return { items, page: Math.max(1, page), limit, total: Number(total) };
 	}
 
-	async getOrThrow(id: number): Promise<JobRun> {
-		const [row] = await this.database.db.select().from(jobRuns).where(eq(jobRuns.id, id));
+	async getOrThrow(id: number): Promise<JobRunWithCompetitor> {
+		const [row] = await this.database.db
+			.select({
+				jobRuns,
+				competitorDomain: competitors.domain,
+				competitorDbName: competitors.name,
+			})
+			.from(jobRuns)
+			.leftJoin(competitors, eq(jobRuns.competitorId, competitors.id))
+			.where(eq(jobRuns.id, id));
 		if (!row) throw new NotFoundException(`Discovery job ${id} not found`);
-		return row;
+		return this.decorate({ ...row.jobRuns, competitorDomain: row.competitorDomain, competitorDbName: row.competitorDbName });
 	}
 
 	async listEvents(
