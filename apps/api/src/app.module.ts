@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 
+import { AdminModule } from './admin/admin.module';
 import { AiModule } from './ai/ai.module';
 import { AppController } from './app.controller';
 import { AuthModule } from './auth/auth.module';
@@ -28,6 +29,7 @@ import { VizajeSyncModule } from './vizaje/vizaje-sync.module';
     VizajeSyncModule,
     JobsModule,
     AiModule,
+    AdminModule,
   ],
 })
 export class AppModule {}

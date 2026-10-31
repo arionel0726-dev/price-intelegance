@@ -69,6 +69,15 @@ export class PolicyContext {
 		return { brand, override };
 	}
 
+	// Public counterpart of the private resolve() above - Milestone 5's
+	// Admin diagnostics need the raw brand-value/override pair (to show
+	// each separately alongside the effective result), not just the
+	// collapsed effective boolean the three convenience methods below
+	// return.
+	resolveRaw(productBrand: string, productId: number): { brand: BrandPolicyRow | undefined; override: ProductPolicyOverrideRow | undefined } {
+		return this.resolve(productBrand, productId);
+	}
+
 	visibleInCatalog(productBrand: string, productId: number): boolean {
 		const { brand, override } = this.resolve(productBrand, productId);
 		return effectiveVisibleInCatalog(brand, override);

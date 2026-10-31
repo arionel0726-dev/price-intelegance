@@ -7,11 +7,14 @@ import {
   competitors,
   count,
   countDistinct,
+  desc,
+  discoveryAttempts,
   eq,
   exists,
   ilike,
   inArray,
   isNotNull,
+  isNull,
   knownPlaceholderImages,
   matches,
   not,
@@ -26,12 +29,19 @@ import {
 
 import { DatabaseService } from '../database/database.service';
 import { canonicalBrand } from '../matching/matching-normalization';
+import {
+  effectiveDiscoveryEnabled,
+  effectivePriceMonitoringEnabled,
+  effectiveVisibleInCatalog,
+  type CompetitorDomain,
+} from '../policy/policy-precedence';
 import { PolicyService } from '../policy/policy.service';
 import {
   CATEGORY_GROUPS,
   CATEGORY_GROUP_LABELS,
   isCategoryGroupKey,
 } from './category-groups';
+import { classifyImageStatus, loadPlaceholderUrlSet, type ImageStatus } from './image-status';
 
 const DEFAULT_PAGE_SIZE = 40;
 const MAX_PAGE_SIZE = 100;
@@ -569,31 +579,406 @@ export class ProductsService {
       conditions.push(inArray(sql`trim(${products.category})`, rawCategories));
     }
 
-    const search = query.search?.trim();
-    if (search) {
-      const term = `%${search}%`;
-
-      conditions.push(
-        or(
-          ilike(products.name, term),
-          ilike(products.brand, term),
-          ilike(products.barcode, term),
-          ilike(products.sourceId, term),
-          exists(
-            this.database.db
-              .select({ id: productBarcodes.id })
-              .from(productBarcodes)
-              .where(
-                and(
-                  eq(productBarcodes.productId, products.id),
-                  ilike(productBarcodes.barcode, term),
-                ),
-              ),
-          ),
-        )!,
-      );
-    }
+    const searchCondition = this.searchCondition(query.search);
+    if (searchCondition) conditions.push(searchCondition);
 
     return and(...conditions);
   }
+
+  // Extracted verbatim from buildWhere's inline search block so Admin's
+  // product list (findAllAdmin below) matches the exact same name/brand/
+  // barcode/sourceId search the ordinary catalog uses, instead of a second,
+  // possibly-drifting implementation.
+  private searchCondition(search: string | undefined): SQL | undefined {
+    const trimmed = search?.trim();
+    if (!trimmed) return undefined;
+
+    const term = `%${trimmed}%`;
+
+    return or(
+      ilike(products.name, term),
+      ilike(products.brand, term),
+      ilike(products.barcode, term),
+      ilike(products.sourceId, term),
+      exists(
+        this.database.db
+          .select({ id: productBarcodes.id })
+          .from(productBarcodes)
+          .where(
+            and(
+              eq(productBarcodes.productId, products.id),
+              ilike(productBarcodes.barcode, term),
+            ),
+          ),
+      ),
+    );
+  }
+
+  // --- Milestone 5: Admin Control Center -----------------------------
+
+  // Admin's product list is deliberately SKU-level (never grouped into
+  // variant families like findAll() above) - each row can carry its own
+  // policy override, and an admin managing overrides needs to see and act
+  // on exactly the SKU they're overriding, not a family representative.
+  // Also deliberately does NOT require products.url IS NOT NULL - Data
+  // Quality explicitly wants to surface legacy/never-website-confirmed
+  // rows too (see getDataQualitySummary below).
+  async findAllAdmin(query: AdminProductsListQuery) {
+    const page = Math.max(1, Math.floor(query.page ?? 1));
+    const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.floor(query.limit ?? DEFAULT_PAGE_SIZE)));
+    const offset = (page - 1) * limit;
+
+    const conditions: SQL[] = [];
+
+    const searchCondition = this.searchCondition(query.search);
+    if (searchCondition) conditions.push(searchCondition);
+
+    if (query.brand) conditions.push(eq(products.brand, query.brand));
+
+    if (query.category && isCategoryGroupKey(query.category)) {
+      const rawCategories = CATEGORY_GROUPS[query.category];
+      conditions.push(inArray(sql`trim(${products.category})`, rawCategories));
+    }
+
+    if (query.imageState && query.imageState !== 'all') {
+      if (query.imageState === 'missing') {
+        conditions.push(isNull(products.imageUrl));
+      } else if (query.imageState === 'placeholder') {
+        conditions.push(
+          and(
+            isNotNull(products.imageUrl),
+            exists(
+              this.database.db
+                .select({ imageUrl: knownPlaceholderImages.imageUrl })
+                .from(knownPlaceholderImages)
+                .where(eq(knownPlaceholderImages.imageUrl, products.imageUrl)),
+            ),
+          )!,
+        );
+      } else {
+        // 'real': present AND not a confirmed placeholder.
+        conditions.push(
+          and(
+            isNotNull(products.imageUrl),
+            notInArray(
+              products.imageUrl,
+              this.database.db.select({ imageUrl: knownPlaceholderImages.imageUrl }).from(knownPlaceholderImages),
+            ),
+          )!,
+        );
+      }
+    }
+
+    const overrideExists = exists(
+      this.database.db.select({ id: productPolicyOverrides.productId }).from(productPolicyOverrides).where(eq(productPolicyOverrides.productId, products.id)),
+    );
+    if (query.overrideState === 'has_override') conditions.push(overrideExists);
+    if (query.overrideState === 'inherit') conditions.push(not(overrideExists));
+
+    if (query.exclusionReason && query.exclusionReason !== 'all') {
+      conditions.push(
+        exists(
+          this.database.db
+            .select({ id: productPolicyOverrides.productId })
+            .from(productPolicyOverrides)
+            .where(
+              and(
+                eq(productPolicyOverrides.productId, products.id),
+                eq(productPolicyOverrides.exclusionReason, query.exclusionReason),
+              ),
+            ),
+        ),
+      );
+    }
+
+    const where = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const [rows, [{ total }], policyContext, placeholderUrls] = await Promise.all([
+      this.database.db
+        .select({
+          id: products.id,
+          brand: products.brand,
+          name: products.name,
+          category: products.category,
+          imageUrl: products.imageUrl,
+          url: products.url,
+          hasOverride: overrideExists,
+          exclusionReason: sql<string | null>`(
+            select ${productPolicyOverrides.exclusionReason}
+            from ${productPolicyOverrides}
+            where ${productPolicyOverrides.productId} = ${products.id}
+          )`,
+          updatedAt: products.updatedAt,
+        })
+        .from(products)
+        .where(where)
+        .orderBy(desc(products.updatedAt), asc(products.id))
+        .limit(limit)
+        .offset(offset),
+      this.database.db.select({ total: count() }).from(products).where(where),
+      this.policy.loadContext(),
+      loadPlaceholderUrlSet(this.database),
+    ]);
+
+    const items = rows.map(row => {
+      const { brand: brandRow, override } = policyContext.resolveRaw(row.brand, row.id);
+      return {
+        ...row,
+        imageStatus: classifyImageStatus(row.imageUrl, placeholderUrls),
+        effective: {
+          visibleInCatalog: effectiveVisibleInCatalog(brandRow, override),
+          makeupDiscoveryEnabled: effectiveDiscoveryEnabled(brandRow, override, 'makeup.md'),
+          ovicoDiscoveryEnabled: effectiveDiscoveryEnabled(brandRow, override, 'ovico.md'),
+          priceMonitoringEnabled: effectivePriceMonitoringEnabled(brandRow, override),
+        },
+      };
+    });
+
+    return {
+      items,
+      pagination: { page, limit, total: Number(total), totalPages: Math.max(1, Math.ceil(Number(total) / limit)) },
+    };
+  }
+
+  // GET /admin/products/:id's effective-policy diagnostic. Every effective
+  // value is computed via the shared policy-precedence.ts functions - this
+  // never recomputes the precedence rule itself, only assembles the
+  // brand/override/effective triple per dimension plus the discovery-
+  // eligibility (matches row? discovery_attempts status? retryEligibleAt?)
+  // and price-monitoring notes the brief asks for. Deliberately never
+  // includes ruleScore/ruleSignals/AI thresholds - that is M3's AI Review
+  // surface, not Admin's.
+  async getAdminProductDetail(id: number) {
+    const [product] = await this.database.db.select().from(products).where(eq(products.id, id));
+    if (!product) throw new NotFoundException('Product not found');
+
+    const [[override], policyContext, matchRows, attemptRows] = await Promise.all([
+      this.database.db.select().from(productPolicyOverrides).where(eq(productPolicyOverrides.productId, id)),
+      this.policy.loadContext(),
+      this.database.db
+        .select({ competitorDomain: competitors.domain })
+        .from(matches)
+        .innerJoin(competitorProductVariants, eq(matches.competitorProductVariantId, competitorProductVariants.id))
+        .innerJoin(competitorProducts, eq(competitorProductVariants.competitorProductId, competitorProducts.id))
+        .innerJoin(competitors, eq(competitorProducts.competitorId, competitors.id))
+        .where(eq(matches.productId, id)),
+      this.database.db
+        .select({
+          competitorDomain: competitors.domain,
+          status: discoveryAttempts.status,
+          retryEligibleAt: discoveryAttempts.retryEligibleAt,
+          lastCheckedAt: discoveryAttempts.lastCheckedAt,
+        })
+        .from(discoveryAttempts)
+        .innerJoin(competitors, eq(discoveryAttempts.competitorId, competitors.id))
+        .where(eq(discoveryAttempts.productId, id)),
+    ]);
+
+    const { brand: brandRow } = policyContext.resolveRaw(product.brand, id);
+    const overrideRow = override ?? undefined;
+
+    const matchedDomains = new Set(matchRows.map(r => r.competitorDomain));
+    const attemptByDomain = new Map(attemptRows.map(r => [r.competitorDomain, r]));
+
+    function discoveryDiagnostic(domain: CompetitorDomain) {
+      const attempt = attemptByDomain.get(domain);
+      return {
+        effective: effectiveDiscoveryEnabled(brandRow, overrideRow, domain),
+        hasMatch: matchedDomains.has(domain),
+        discoveryAttemptStatus: attempt?.status ?? null,
+        retryEligibleAt: attempt?.retryEligibleAt ?? null,
+        lastCheckedAt: attempt?.lastCheckedAt ?? null,
+      };
+    }
+
+    return {
+      product,
+      override: overrideRow ?? null,
+      brandPolicy: brandRow ?? null,
+      effectivePolicy: {
+        catalog: {
+          brandValue: brandRow?.visibleInCatalog ?? null,
+          override: overrideRow?.catalogEnabledOverride ?? null,
+          effective: effectiveVisibleInCatalog(brandRow, overrideRow),
+        },
+        priceMonitoring: {
+          brandValue: brandRow?.priceMonitoringEnabled ?? null,
+          override: overrideRow?.priceMonitoringEnabledOverride ?? null,
+          effective: effectivePriceMonitoringEnabled(brandRow, overrideRow),
+          // Disabling monitoring never deletes existing match data - UI
+          // copy only, the backend never touches `matches` here.
+          note: 'Disabling price monitoring stops future price refreshes. It never deletes existing match data.',
+        },
+        discovery: {
+          makeup: { brandValue: brandRow?.makeupDiscoveryEnabled ?? null, override: overrideRow?.discoveryEnabledOverride ?? null, ...discoveryDiagnostic('makeup.md') },
+          ovico: { brandValue: brandRow?.ovicoDiscoveryEnabled ?? null, override: overrideRow?.discoveryEnabledOverride ?? null, ...discoveryDiagnostic('ovico.md') },
+        },
+      },
+    };
+  }
+
+  // Tri-state override write, with the sparse-row hygiene the brief
+  // requires: if the patch results in every override column NULL AND no
+  // reason/note, the row is deleted outright rather than kept as an
+  // all-NULL row (product_policy_overrides is documented as sparse - "a
+  // row exists only where a product-level override was explicitly set").
+  async updateProductPolicy(
+    id: number,
+    patch: {
+      catalogEnabledOverride?: boolean | null;
+      discoveryEnabledOverride?: boolean | null;
+      priceMonitoringEnabledOverride?: boolean | null;
+      exclusionReason?: string | null;
+      reasonNote?: string | null;
+    },
+    updatedBy: string | null,
+  ) {
+    const [product] = await this.database.db.select({ id: products.id }).from(products).where(eq(products.id, id));
+    if (!product) throw new NotFoundException('Product not found');
+
+    const [existing] = await this.database.db.select().from(productPolicyOverrides).where(eq(productPolicyOverrides.productId, id));
+
+    const next = {
+      catalogEnabledOverride: patch.catalogEnabledOverride !== undefined ? patch.catalogEnabledOverride : existing?.catalogEnabledOverride ?? null,
+      discoveryEnabledOverride: patch.discoveryEnabledOverride !== undefined ? patch.discoveryEnabledOverride : existing?.discoveryEnabledOverride ?? null,
+      priceMonitoringEnabledOverride:
+        patch.priceMonitoringEnabledOverride !== undefined ? patch.priceMonitoringEnabledOverride : existing?.priceMonitoringEnabledOverride ?? null,
+      exclusionReason: patch.exclusionReason !== undefined ? patch.exclusionReason : existing?.exclusionReason ?? null,
+      reasonNote: patch.reasonNote !== undefined ? patch.reasonNote : existing?.reasonNote ?? null,
+    };
+
+    const isFullyEmpty =
+      next.catalogEnabledOverride === null &&
+      next.discoveryEnabledOverride === null &&
+      next.priceMonitoringEnabledOverride === null &&
+      next.exclusionReason === null &&
+      next.reasonNote === null;
+
+    if (isFullyEmpty) {
+      if (existing) {
+        await this.database.db.delete(productPolicyOverrides).where(eq(productPolicyOverrides.productId, id));
+      }
+      return null;
+    }
+
+    const [row] = await this.database.db
+      .insert(productPolicyOverrides)
+      .values({ productId: id, ...next, updatedBy })
+      .onConflictDoUpdate({ target: productPolicyOverrides.productId, set: { ...next, updatedBy, updatedAt: new Date() } })
+      .returning();
+
+    return row;
+  }
+
+  // Milestone 1's image classification rule, reused verbatim (via
+  // image-status.ts) rather than a frequency heuristic. products.brand is
+  // NOT NULL in the schema, so "empty/unknown brand" is genuinely
+  // impossible at the DB level - this summary reports 0 for that category
+  // rather than inventing a heuristic for a case that cannot occur (see
+  // Milestone 5 report point 15).
+  async getDataQualitySummary() {
+    // Deliberately 3 separate WHERE-filtered counts rather than one
+    // GROUP BY over imageStatusExpr(): using the same CASE expression in
+    // both a SELECT list and a GROUP BY clause in one query hit a drizzle-
+    // orm 0.45.2 quirk where the two renderings of the expression
+    // diverged (the SELECT copy lost products' table qualification on
+    // image_url, turning the placeholder EXISTS subquery into a
+    // self-referential always-true check) - caught by this script's own
+    // "placeholder count unaffected" assertion failing while the delta
+    // assertions for missing/real still happened to pass, which is exactly
+    // why this is 3 independent, individually-correct queries instead.
+    const missingCondition = isNull(products.imageUrl);
+    const placeholderCondition = and(
+      isNotNull(products.imageUrl),
+      exists(this.database.db.select({ imageUrl: knownPlaceholderImages.imageUrl }).from(knownPlaceholderImages).where(eq(knownPlaceholderImages.imageUrl, products.imageUrl))),
+    )!;
+    const realCondition = and(
+      isNotNull(products.imageUrl),
+      notInArray(products.imageUrl, this.database.db.select({ imageUrl: knownPlaceholderImages.imageUrl }).from(knownPlaceholderImages)),
+    )!;
+
+    const [missingCount, placeholderCount, realCount, noUrlCount, exclusionCounts, emptyBrandCount] = await Promise.all([
+      this.database.db.select({ total: count() }).from(products).where(missingCondition),
+      this.database.db.select({ total: count() }).from(products).where(placeholderCondition),
+      this.database.db.select({ total: count() }).from(products).where(realCondition),
+      this.database.db.select({ total: count() }).from(products).where(isNull(products.url)),
+      this.database.db
+        .select({ reason: productPolicyOverrides.exclusionReason, total: count() })
+        .from(productPolicyOverrides)
+        .where(isNotNull(productPolicyOverrides.exclusionReason))
+        .groupBy(productPolicyOverrides.exclusionReason),
+      // Impossible given brand NOT NULL - included for completeness/
+      // transparency rather than silently omitted, see report point 15.
+      this.database.db.select({ total: count() }).from(products).where(eq(products.brand, '')),
+    ]);
+
+    const byImageStatus: Record<ImageStatus, number> = {
+      missing: Number(missingCount[0]?.total ?? 0),
+      placeholder: Number(placeholderCount[0]?.total ?? 0),
+      real: Number(realCount[0]?.total ?? 0),
+    };
+
+    return {
+      images: byImageStatus,
+      productsWithNoUrl: Number(noUrlCount[0]?.total ?? 0),
+      productsWithEmptyBrand: Number(emptyBrandCount[0]?.total ?? 0),
+      productsByExclusionReason: exclusionCounts.map(row => ({ reason: row.reason, total: Number(row.total) })),
+    };
+  }
+
+  // Backs the Data Quality image list view - same imageState filter values
+  // as findAllAdmin's, factored out as its own lightweight query rather
+  // than forcing the full admin product-list shape (override/effective
+  // policy) onto a view that's purely about image status.
+  async listImagesForAdmin(query: { page?: number; limit?: number; imageState?: ImageStatus | 'all' }) {
+    const page = Math.max(1, Math.floor(query.page ?? 1));
+    const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.floor(query.limit ?? DEFAULT_PAGE_SIZE)));
+    const offset = (page - 1) * limit;
+
+    // Same WHERE-level conditions as findAllAdmin's imageState branches
+    // (plain drizzle helpers - eq/isNull/notInArray - never a raw
+    // correlated-subquery `sql` expression; see image-status.ts for why).
+    let where: SQL | undefined;
+    if (query.imageState === 'missing') {
+      where = isNull(products.imageUrl);
+    } else if (query.imageState === 'placeholder') {
+      where = and(
+        isNotNull(products.imageUrl),
+        exists(this.database.db.select({ imageUrl: knownPlaceholderImages.imageUrl }).from(knownPlaceholderImages).where(eq(knownPlaceholderImages.imageUrl, products.imageUrl))),
+      );
+    } else if (query.imageState === 'real') {
+      where = and(
+        isNotNull(products.imageUrl),
+        notInArray(products.imageUrl, this.database.db.select({ imageUrl: knownPlaceholderImages.imageUrl }).from(knownPlaceholderImages)),
+      );
+    }
+
+    const [rows, [{ total }], placeholderUrls] = await Promise.all([
+      this.database.db
+        .select({ id: products.id, brand: products.brand, name: products.name, imageUrl: products.imageUrl })
+        .from(products)
+        .where(where)
+        .orderBy(asc(products.id))
+        .limit(limit)
+        .offset(offset),
+      this.database.db.select({ total: count() }).from(products).where(where),
+      loadPlaceholderUrlSet(this.database),
+    ]);
+
+    const items = rows.map(row => ({ ...row, imageStatus: classifyImageStatus(row.imageUrl, placeholderUrls) }));
+
+    return { items, pagination: { page, limit, total: Number(total), totalPages: Math.max(1, Math.ceil(Number(total) / limit)) } };
+  }
+
 }
+
+export type AdminProductsListQuery = {
+  page?: number;
+  limit?: number;
+  search?: string;
+  brand?: string;
+  category?: string;
+  imageState?: ImageStatus | 'all';
+  overrideState?: 'all' | 'has_override' | 'inherit';
+  exclusionReason?: string;
+};

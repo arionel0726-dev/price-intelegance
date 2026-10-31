@@ -41,6 +41,21 @@ export class AppSettingsService {
 		return DEFAULT_AUTO_CONFIRM_THRESHOLD;
 	}
 
+	// Admin Discovery Rules screen (Milestone 5) - the first writer this
+	// table has ever had. Plain upsert-by-key (appSettings.key is the PK) -
+	// no versioning/audit trail for this table exists yet, matching the
+	// rest of app_settings' "small set of global business toggles" scope.
+	async setAiEnabled(value: boolean): Promise<void> {
+		await this.setValue(AI_ENABLED_KEY, value);
+	}
+
+	// Callers MUST validate range themselves (reject, never clamp - see the
+	// Admin settings controller) before calling this; this method only
+	// persists, exactly like getAutoConfirmThreshold only reads.
+	async setAutoConfirmThreshold(value: number): Promise<void> {
+		await this.setValue(AI_AUTO_CONFIRM_THRESHOLD_KEY, value);
+	}
+
 	private async getValue(key: string): Promise<unknown> {
 		const [row] = await this.database.db
 			.select({ value: appSettings.value })
@@ -48,5 +63,12 @@ export class AppSettingsService {
 			.where(eq(appSettings.key, key));
 
 		return row?.value;
+	}
+
+	private async setValue(key: string, value: unknown): Promise<void> {
+		await this.database.db
+			.insert(appSettings)
+			.values({ key, value })
+			.onConflictDoUpdate({ target: appSettings.key, set: { value, updatedAt: new Date() } });
 	}
 }

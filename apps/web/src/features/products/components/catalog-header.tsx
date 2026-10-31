@@ -11,7 +11,8 @@ import { logout } from '@/features/auth/api/logout'
 const NAV_ITEMS = [
 	{ href: '/', label: 'Catalog' },
 	{ href: '/jobs', label: 'Jobs' },
-	{ href: '/ai-review', label: 'AI Review' }
+	{ href: '/ai-review', label: 'AI Review' },
+	{ href: '/admin', label: 'Admin' }
 ]
 
 export function CatalogHeader() {
