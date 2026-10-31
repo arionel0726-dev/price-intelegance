@@ -226,19 +226,19 @@ async function seed() {
 		{
 			productId: chanel.id,
 			competitorProductVariantId: chanelMakeupVariant.id,
-			source: 'algorithm',
+			source: 'auto', // was 'algorithm' - fixed to match matching.service.ts's real MatchSource type (see drizzle/0010_fix_legacy_algorithm_match_source.sql)
 			score: 95
 		},
 		{
 			productId: chanel.id,
 			competitorProductVariantId: chanelBrocardVariant.id,
-			source: 'algorithm',
+			source: 'auto', // was 'algorithm' - fixed to match matching.service.ts's real MatchSource type (see drizzle/0010_fix_legacy_algorithm_match_source.sql)
 			score: 91
 		},
 		{
 			productId: lancome.id,
 			competitorProductVariantId: lancomeMakeupVariant.id,
-			source: 'algorithm',
+			source: 'auto', // was 'algorithm' - fixed to match matching.service.ts's real MatchSource type (see drizzle/0010_fix_legacy_algorithm_match_source.sql)
 			score: 94
 		},
 		{

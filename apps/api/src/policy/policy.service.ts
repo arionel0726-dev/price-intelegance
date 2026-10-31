@@ -52,6 +52,24 @@ export class PolicyService {
 
 		return new Set(rows.map(row => row.canonicalKey));
 	}
+
+	// Same shape as loadHiddenCanonicalBrandKeys() above, for
+	// priceMonitoringEnabled instead of visibleInCatalog - Milestone 6's
+	// dashboard needs a SQL-pushable "eligible monitored products"
+	// condition (aggregating over potentially thousands of products, so a
+	// JS post-filter over every row is not an option), built the same way
+	// ProductsService.resolveHiddenRawBrands() already builds its
+	// catalog-visibility one. Catalog visibility and price-monitoring
+	// eligibility are independent per Milestone 1's design - this method
+	// deliberately never consults visibleInCatalog.
+	async loadPriceMonitoringDisabledCanonicalBrandKeys(): Promise<Set<string>> {
+		const rows = await this.database.db
+			.select({ canonicalKey: brands.canonicalKey })
+			.from(brands)
+			.where(eq(brands.priceMonitoringEnabled, false));
+
+		return new Set(rows.map(row => row.canonicalKey));
+	}
 }
 
 export class PolicyContext {

@@ -12,7 +12,8 @@ const NAV_ITEMS = [
 	{ href: '/', label: 'Catalog' },
 	{ href: '/jobs', label: 'Jobs' },
 	{ href: '/ai-review', label: 'AI Review' },
-	{ href: '/admin', label: 'Admin' }
+	{ href: '/admin', label: 'Admin' },
+	{ href: '/dashboard', label: 'Dashboard' }
 ]
 
 export function CatalogHeader() {

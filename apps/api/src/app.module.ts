@@ -7,6 +7,7 @@ import { AiModule } from './ai/ai.module';
 import { AppController } from './app.controller';
 import { AuthModule } from './auth/auth.module';
 import { CompetitorsModule } from './competitors/competitors.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 import { DatabaseModule } from './database/database.module';
 import { JobsModule } from './jobs/jobs.module';
 import { MatchingModule } from './matching/matching.module';
@@ -30,6 +31,7 @@ import { VizajeSyncModule } from './vizaje/vizaje-sync.module';
     JobsModule,
     AiModule,
     AdminModule,
+    DashboardModule,
   ],
 })
 export class AppModule {}

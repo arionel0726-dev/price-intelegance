@@ -1,0 +1,18 @@
+-- Normalizes the 3 matches rows written with source='algorithm' by the
+-- dev seed script (packages/db/src/seed.ts) back when it was first
+-- written, to the 'auto' value the real matching code (matching.service.ts)
+-- has used exclusively since this repository's very first commit
+-- (confirmed via `git show cbdee58:apps/api/src/matching/matching.service.ts`
+-- - 'auto' was already the only value the production code ever wrote,
+-- even then). 'algorithm' was never a value any real code path produced;
+-- it was only ever the seed script's own ad-hoc label for "an automated,
+-- scored match" - semantically identical to what 'auto' means today, just
+-- an inconsistent string used in one standalone demo-data script.
+--
+-- Confirmed safe before writing this: no code anywhere branches on the
+-- literal 'algorithm' (searched the whole repo); this UPDATEs the source
+-- column only, never productId/competitorProductVariantId, so it cannot
+-- collide with the (productId, competitorProductVariantId) unique
+-- constraint on matches. See dashboard.service.ts's CONFIRMED_MATCH_SOURCES
+-- comment and the Milestone 6 follow-up report for the investigation.
+UPDATE "matches" SET "source" = 'auto' WHERE "source" = 'algorithm';
