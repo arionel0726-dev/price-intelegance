@@ -78,6 +78,13 @@
       "when": 1793461337480,
       "tag": "0010_fix_legacy_algorithm_match_source",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1793496931836,
+      "tag": "0011_catalog_ingestion_v1_ovico",
+      "breakpoints": true
     }
   ]
 }

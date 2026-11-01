@@ -34,6 +34,25 @@ export type ProductFamily = {
 
 	createdAt: string
 	updatedAt: string
+
+	// Catalog Ingestion v1 (OVICO) - additive, optional: absent/undefined on
+	// every existing Vizaje card (server omits them for that source rather
+	// than sending null, so an older cached response shape is still valid).
+	// Present on an OVICO card: `source: 'ovico'`, `externalCode` is the
+	// OVICO-side product id (never comparable to a Vizaje article/SKU - see
+	// the ingestion report's external-ID section), `url` links to the real
+	// ovico.md product page, `availability` reflects the listing (v1 has no
+	// confirmed out-of-stock signal, so this is currently always true for
+	// every OVICO row - see the ingestion report's limitations).
+	source?: 'vizaje' | 'ovico'
+	externalCode?: string | null
+	url?: string | null
+	availability?: boolean | null
+	// Always null in v1 - no discount/old-price markup was found anywhere
+	// in the real OVICO listing pages this was built against. Kept so a
+	// future milestone that finds one (e.g. on the product detail page) is
+	// an additive backend change, not another frontend type change.
+	oldPrice?: string | null
 }
 
 export type PaginationMeta = {

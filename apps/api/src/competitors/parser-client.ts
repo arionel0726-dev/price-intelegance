@@ -60,6 +60,22 @@ export async function requestSearchBatch(
   return (await response.json()) as SearchBatchResponse;
 }
 
+// Catalog Ingestion v1 (OVICO) - fetches exactly one brand-listing page's
+// raw HTML. Separate from requestParsedBatch above (which drives the
+// existing per-SKU crawl_category + N detail-fetch path) - field parsing
+// for this path happens here in apps/api, not in the parser service, see
+// ovico-catalog/ovico-listing-parser.ts for why.
+export async function requestOvicoBrandPageHtml(
+  parserUrl: string,
+  url: string,
+): Promise<string> {
+  const response = await postToParser(parserUrl, '/catalog/ovico/brand-page', { url });
+
+  const body = (await response.json()) as { url: string; html: string };
+
+  return body.html;
+}
+
 async function postToParser(
   parserUrl: string,
   path: string,

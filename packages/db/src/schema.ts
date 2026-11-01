@@ -128,10 +128,32 @@ export const competitorProducts = pgTable(
 		url: text('url').notNull(),
 		currency: text('currency').default('MDL').notNull(),
 
+		// Catalog Ingestion v1 (OVICO) - nullable: only set by the brand-
+		// catalog ingestion path, which always knows the canonical Vizaje
+		// brand it's syncing for (see competitor_brand_sources.brandId).
+		// Left NULL for rows persisted by the existing per-SKU search/
+		// discovery path, which never resolves a canonical brand up front -
+		// no attempt is made to backfill it from the free-text `brand`
+		// column above, which is a raw site label, not a canonical key.
+		brandId: text('brand_id').references(() => brands.canonicalKey),
+
+		active: boolean('active').default(true).notNull(),
+		// Defaulted to now() rather than left nullable so every row (old
+		// search-discovered ones included) has a well-defined "first/last
+		// seen" value from the moment this column exists, instead of a
+		// silent NULL that every future freshness query would have to
+		// special-case.
+		firstSeenAt: timestamp('first_seen_at').defaultNow().notNull(),
+		lastSeenAt: timestamp('last_seen_at').defaultNow().notNull(),
+		lastSyncedAt: timestamp('last_synced_at'),
+
 		createdAt: timestamp('created_at').defaultNow().notNull(),
 		updatedAt: timestamp('updated_at').defaultNow().notNull()
 	},
-	table => [unique().on(table.competitorId, table.externalId)]
+	table => [
+		unique().on(table.competitorId, table.externalId),
+		index('competitor_products_brand_id_idx').on(table.brandId)
+	]
 )
 
 export const competitorProductVariants = pgTable(
@@ -153,12 +175,134 @@ export const competitorProductVariants = pgTable(
 			scale: 2
 		}),
 
+		// Catalog Ingestion v1 (OVICO) - no discount/old-price markup was
+		// observed anywhere in the real brand-listing page this was built
+		// against (see ovico-listing-parser.ts), so this is always NULL for
+		// catalog-ingested rows today; kept nullable/additive so a future
+		// milestone that does find discount markup (e.g. on the product
+		// detail page) is an UPDATE, not another migration.
+		oldPrice: numeric('old_price', {
+			precision: 10,
+			scale: 2
+		}),
+
+		// Fragrance concentration (e.g. "Парфюмерная вода") and shade, where
+		// the source distinguishes them from the free-text `label`/`volume`
+		// above. Both nullable/additive - unpopulated by the existing
+		// per-SKU search/discovery path.
+		concentration: text('concentration'),
+		shade: text('shade'),
+
 		available: boolean('available').default(true).notNull(),
+
+		// true only for a catalog-ingested variant whose price is a listing
+		// page's "от" (from)-prefixed lowest price for a multi-SKU
+		// configurable product, not an exact single-SKU price - see
+		// ovico-listing-parser.ts. Always false for every other row
+		// (default, and for every row the existing search/discovery path
+		// persists) so this never needs to be treated as "unknown".
+		isApproximatePrice: boolean('is_approximate_price').default(false).notNull(),
+
+		lastSeenAt: timestamp('last_seen_at').defaultNow().notNull(),
+		lastSyncedAt: timestamp('last_synced_at'),
 
 		createdAt: timestamp('created_at').defaultNow().notNull(),
 		updatedAt: timestamp('updated_at').defaultNow().notNull()
 	},
 	table => [unique().on(table.competitorProductId, table.externalId)]
+)
+
+// Catalog Ingestion v1 (OVICO) - the persisted mapping from a canonical
+// Vizaje brand to a competitor's own brand-listing page(s). Deliberately
+// UNIQUE(competitorId, sourceUrl), NOT (brandId, competitorId): one
+// canonical brand can have several source pages on the same competitor
+// (e.g. OVICO splits Armani across /armani, /armani-beauty and
+// /armani-prive) - see the milestone spec's brand-mapping examples.
+export const competitorBrandSources = pgTable(
+	'competitor_brand_sources',
+	{
+		id: serial('id').primaryKey(),
+
+		brandId: text('brand_id')
+			.references(() => brands.canonicalKey)
+			.notNull(),
+		competitorId: integer('competitor_id')
+			.references(() => competitors.id)
+			.notNull(),
+
+		sourceUrl: text('source_url').notNull(),
+		externalName: text('external_name'),
+		externalId: text('external_id'),
+
+		enabled: boolean('enabled').default(true).notNull(),
+
+		// 'confirmed' = a real, verified source page (what this milestone's
+		// 26 known OVICO mappings all start as). 'missing' = the competitor
+		// genuinely doesn't sell this brand - persisted explicitly so
+		// nothing keeps re-searching for it forever (see spec). 'needs_review'
+		// = found but ambiguous, awaiting human Admin confirmation. No
+		// status here is ever set by an automatic frequency heuristic - same
+		// human-confirmation discipline as known_placeholder_images above.
+		status: text('status').notNull().default('needs_review'),
+
+		lastSyncedAt: timestamp('last_synced_at'),
+		lastSyncStatus: text('last_sync_status'),
+		lastSyncError: text('last_sync_error'),
+
+		createdAt: timestamp('created_at').defaultNow().notNull(),
+		updatedAt: timestamp('updated_at').defaultNow().notNull()
+	},
+	table => [
+		unique().on(table.competitorId, table.sourceUrl),
+		index('competitor_brand_sources_brand_competitor_idx').on(
+			table.brandId,
+			table.competitorId
+		),
+		check(
+			'competitor_brand_sources_status_check',
+			sql`${table.status} IN ('confirmed', 'missing', 'needs_review')`
+		)
+	]
+)
+
+// Catalog Ingestion v1 (OVICO) - one row per brand-source sync attempt.
+// Deliberately separate from job_runs/discoveryAttempts: a catalog sync
+// crawls one brand-listing page end to end in one request, with no
+// per-SKU claim/lease/heartbeat model to share - folding it into job_runs'
+// counters would mean overloading their meaning for a fundamentally
+// different kind of run (see spec point 16).
+export const catalogSyncRuns = pgTable(
+	'catalog_sync_runs',
+	{
+		id: serial('id').primaryKey(),
+
+		competitorId: integer('competitor_id')
+			.references(() => competitors.id)
+			.notNull(),
+		brandSourceId: integer('brand_source_id')
+			.references(() => competitorBrandSources.id)
+			.notNull(),
+
+		status: text('status').notNull().default('running'),
+
+		pagesProcessed: integer('pages_processed').default(0).notNull(),
+		discovered: integer('discovered').default(0).notNull(),
+		inserted: integer('inserted').default(0).notNull(),
+		updated: integer('updated').default(0).notNull(),
+		skipped: integer('skipped').default(0).notNull(),
+		errorCount: integer('error_count').default(0).notNull(),
+		errorSummary: text('error_summary'),
+
+		startedAt: timestamp('started_at').defaultNow().notNull(),
+		finishedAt: timestamp('finished_at')
+	},
+	table => [
+		check(
+			'catalog_sync_runs_status_check',
+			sql`${table.status} IN ('running', 'completed', 'failed')`
+		),
+		index('catalog_sync_runs_brand_source_idx').on(table.brandSourceId, table.startedAt)
+	]
 )
 
 export const matches = pgTable(
@@ -549,6 +693,12 @@ export type NewCompetitorProduct = typeof competitorProducts.$inferInsert
 export type CompetitorProductVariant = typeof competitorProductVariants.$inferSelect
 export type NewCompetitorProductVariant =
 	typeof competitorProductVariants.$inferInsert
+
+export type CompetitorBrandSource = typeof competitorBrandSources.$inferSelect
+export type NewCompetitorBrandSource = typeof competitorBrandSources.$inferInsert
+
+export type CatalogSyncRun = typeof catalogSyncRuns.$inferSelect
+export type NewCatalogSyncRun = typeof catalogSyncRuns.$inferInsert
 
 export type Match = typeof matches.$inferSelect
 export type NewMatch = typeof matches.$inferInsert

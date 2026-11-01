@@ -10,7 +10,8 @@ export function useProducts(params: GetProductsParams) {
 			params.limit,
 			params.search,
 			params.brand,
-			params.category
+			params.category,
+			params.source
 		],
 		queryFn: () => getProducts(params),
 		// Keeps the previous page's data on screen while the next page/filter

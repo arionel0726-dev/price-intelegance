@@ -153,3 +153,40 @@ export type PlaceholderCandidate = {
 	occurrences: number
 	sample: Array<{ id: number; brand: string; name: string }>
 }
+
+// Catalog Ingestion v1 (OVICO) - mirrors
+// apps/api/src/admin/admin-ovico-sources.controller.ts's response shapes.
+export type OvicoBrandSourceStatus = 'confirmed' | 'missing' | 'needs_review'
+
+export type OvicoBrandSource = {
+	id: number
+	brandId: string
+	competitorId: number
+	sourceUrl: string
+	externalName: string | null
+	externalId: string | null
+	enabled: boolean
+	status: OvicoBrandSourceStatus
+	lastSyncedAt: string | null
+	lastSyncStatus: string | null
+	lastSyncError: string | null
+	createdAt: string
+	updatedAt: string
+}
+
+export type OvicoBrandSourcesEntry = {
+	brand: Brand
+	sources: OvicoBrandSource[]
+}
+
+export type OvicoCatalogSyncResult = {
+	runId: number
+	status: 'completed' | 'failed'
+	pagesProcessed: number
+	discovered: number
+	inserted: number
+	updated: number
+	skipped: number
+	errorCount: number
+	errorSummary: string | null
+}

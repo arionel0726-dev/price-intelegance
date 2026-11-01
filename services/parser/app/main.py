@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from app.browser_pool import BrowserPool
 from app.crawlers.makeup import MakeupCrawler
 from app.crawlers.ovico import OvicoCrawler
+from app.crawlers.ovico_brand_page import OvicoBrandPageFetcher
 from app.crawlers.vizaje import VizajeCrawler
 from app.models import (
     BatchParseFailure,
@@ -55,6 +56,7 @@ makeup_parser = MakeupParser(browser_pool)
 makeup_crawler = MakeupCrawler()
 ovico_parser = OvicoParser()
 ovico_crawler = OvicoCrawler()
+ovico_brand_page_fetcher = OvicoBrandPageFetcher()
 vizaje_parser = VizajeParser()
 vizaje_crawler = VizajeCrawler()
 makeup_searcher = MakeupSearcher(browser_pool)
@@ -78,6 +80,20 @@ class BatchParseMakeupRequest(BaseModel):
 class CrawlOvicoRequest(BaseModel):
     url: str
     max_products: int | None = None
+
+
+# Catalog Ingestion v1 (OVICO-only) - separate request/response shape from
+# CrawlOvicoRequest above, which drives the existing per-SKU crawl_category
+# path. This fetches exactly one brand-listing page and returns its raw
+# HTML; field parsing happens on the apps/api side (see
+# ovico-catalog/ovico-listing-parser.ts), not here.
+class FetchOvicoBrandPageRequest(BaseModel):
+    url: str
+
+
+class FetchOvicoBrandPageResponse(BaseModel):
+    url: str
+    html: str
 
 
 class BatchParseOvicoRequest(BaseModel):
@@ -254,6 +270,32 @@ async def crawl_ovico(
             competitor="ovico",
             total=len(products),
             products=products,
+        )
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=422,
+            detail=str(error),
+        ) from error
+
+
+@app.post(
+    "/catalog/ovico/brand-page",
+    response_model=FetchOvicoBrandPageResponse,
+)
+async def fetch_ovico_brand_page(
+    payload: FetchOvicoBrandPageRequest,
+):
+    try:
+        async with create_ovico_client() as client:
+            html = await ovico_brand_page_fetcher.fetch_brand_page_html(
+                client,
+                payload.url,
+            )
+
+        return FetchOvicoBrandPageResponse(
+            url=payload.url,
+            html=html,
         )
 
     except Exception as error:

@@ -70,6 +70,16 @@ describe('parseCatalogSearchParams (URL -> partial filters)', () => {
 		const params = new URLSearchParams('brand=&category=')
 		expect(parseCatalogSearchParams(params)).toEqual({})
 	})
+
+	test('reads a valid source param', () => {
+		expect(parseCatalogSearchParams(new URLSearchParams('source=ovico')).source).toBe('ovico')
+		expect(parseCatalogSearchParams(new URLSearchParams('source=vizaje')).source).toBe('vizaje')
+	})
+
+	test('an unknown source value is dropped, never passed through', () => {
+		const params = new URLSearchParams('source=makeup')
+		expect(parseCatalogSearchParams(params).source).toBeUndefined()
+	})
 })
 
 describe('serializeCatalogFilters (filters -> URL)', () => {
@@ -78,7 +88,7 @@ describe('serializeCatalogFilters (filters -> URL)', () => {
 	})
 
 	test('non-default fields round-trip back to the same filters', () => {
-		const filters = { search: 'serum', brand: 'Nivea', category: 'skincare', view: 'list' as const, page: 3 }
+		const filters = { search: 'serum', brand: 'Nivea', category: 'skincare', view: 'list' as const, page: 3, source: 'ovico' as const }
 		const query = serializeCatalogFilters(filters)
 
 		expect(parseCatalogSearchParams(new URLSearchParams(query))).toEqual(filters)
@@ -87,6 +97,21 @@ describe('serializeCatalogFilters (filters -> URL)', () => {
 	test('page=1 (the default) is omitted even when other filters are set', () => {
 		const query = serializeCatalogFilters({ ...CATALOG_DEFAULTS, brand: 'Nivea' })
 		expect(query).toBe('brand=Nivea')
+	})
+
+	test('source=vizaje (the default) is omitted; source=ovico is kept', () => {
+		expect(serializeCatalogFilters({ ...CATALOG_DEFAULTS, source: 'vizaje' })).toBe('')
+		expect(serializeCatalogFilters({ ...CATALOG_DEFAULTS, source: 'ovico' })).toBe('source=ovico')
+	})
+
+	test('source round-trips through the URL alongside other filters', () => {
+		const filters = { ...CATALOG_DEFAULTS, brand: 'Nivea', source: 'ovico' as const }
+		const query = serializeCatalogFilters(filters)
+
+		expect(parseCatalogSearchParams(new URLSearchParams(query))).toEqual({
+			brand: 'Nivea',
+			source: 'ovico'
+		})
 	})
 })
 
@@ -120,6 +145,16 @@ describe('resolveCatalogFilters (URL precedence over localStorage)', () => {
 
 	test('a fully empty URL with default preferences resolves to CATALOG_DEFAULTS', () => {
 		expect(resolveCatalogFilters({}, DEFAULT_PREFERENCES)).toEqual(CATALOG_DEFAULTS)
+	})
+
+	test('source defaults to vizaje and is NEVER read from localStorage (unlike brand/category/view)', () => {
+		const resolved = resolveCatalogFilters({}, DEFAULT_PREFERENCES)
+		expect(resolved.source).toBe('vizaje')
+	})
+
+	test('the URL wins for source when it specifies ovico', () => {
+		const resolved = resolveCatalogFilters({ source: 'ovico' }, DEFAULT_PREFERENCES)
+		expect(resolved.source).toBe('ovico')
 	})
 })
 

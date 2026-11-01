@@ -20,6 +20,27 @@ type ProductCardProps = {
 export function ProductCard({ product, onNavigateAway }: ProductCardProps) {
 	const matchState = comparePrices(product.price, product.competitorPrice)
 
+	// Catalog Ingestion v1 (OVICO) - `product.id` for an OVICO card is a
+	// competitor_products row id, a completely different id space from
+	// Vizaje's own `products.id`. Linking it to /products/:id (the Vizaje
+	// detail page) would load the wrong product or 404. No internal OVICO
+	// product detail page exists yet (out of scope - "minimal" per spec),
+	// so an OVICO card links straight to the real ovico.md product page
+	// instead, in a new tab - same spirit as the existing external "Open
+	// site" link on the Vizaje detail page's competitor rows.
+	if (product.source === 'ovico') {
+		return (
+			<a
+				href={product.url ?? undefined}
+				target="_blank"
+				rel="noopener noreferrer"
+				className="group block rounded outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
+			>
+				<OvicoCardBody product={product} />
+			</a>
+		)
+	}
+
 	return (
 		<Link
 			href={`/products/${product.id}`}
@@ -74,6 +95,63 @@ export function ProductCard({ product, onNavigateAway }: ProductCardProps) {
 				</div>
 			</article>
 		</Link>
+	)
+}
+
+// Catalog Ingestion v1 (OVICO) - a competitor catalog card: no price-match
+// coverage (that's matching, explicitly out of scope this milestone), no
+// variant-family grouping (v1 is one variant per product). Shows the OVICO
+// external code and availability per the spec's card-field list instead.
+function OvicoCardBody({ product }: { product: ProductFamily }) {
+	return (
+		<article>
+			<div className="relative aspect-[1/1.12] overflow-hidden rounded bg-surface">
+				{product.imageUrl ? (
+					<Image
+						src={product.imageUrl}
+						alt={product.name}
+						fill
+						className="object-contain p-8 transition-transform duration-200 group-hover:scale-[1.03]"
+					/>
+				) : (
+					<div className="flex h-full items-center justify-center text-sm text-text-muted">
+						No image
+					</div>
+				)}
+			</div>
+
+			<div className="pt-4">
+				<div className="flex items-center justify-between gap-2">
+					<p className="text-xs font-medium uppercase tracking-[0.12em] text-text-secondary">
+						{product.brand}
+					</p>
+
+					<span className="rounded border border-hairline px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.1em] text-text-muted">
+						OVICO
+					</span>
+				</div>
+
+				<h2 className="mt-1.5 line-clamp-2 text-base font-normal leading-snug text-text-primary">
+					{product.name}
+				</h2>
+
+				{product.volume && <p className="mt-1 text-sm text-text-muted">{product.volume}</p>}
+
+				<div className="mt-3 flex items-baseline justify-between gap-3">
+					<p className="text-lg font-medium tabular-nums">
+						<PriceText price={product.price} state="neutral" />
+					</p>
+
+					{product.availability === false && (
+						<span className="text-xs text-text-muted">Unavailable</span>
+					)}
+				</div>
+
+				{product.externalCode && (
+					<p className="mt-1 text-xs text-text-muted">Code: {product.externalCode}</p>
+				)}
+			</div>
+		</article>
 	)
 }
 

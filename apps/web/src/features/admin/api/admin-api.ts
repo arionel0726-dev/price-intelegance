@@ -9,6 +9,10 @@ import type {
 	Brand,
 	BrandPolicyPatch,
 	DataQualitySummary,
+	OvicoBrandSource,
+	OvicoBrandSourcesEntry,
+	OvicoBrandSourceStatus,
+	OvicoCatalogSyncResult,
 	PlaceholderCandidate,
 	PlaceholderEntry,
 	ProductPolicyPatch
@@ -113,4 +117,35 @@ export function updatePlaceholderNote(imageUrl: string, note: string | null) {
 
 export function removePlaceholder(imageUrl: string) {
 	return apiFetch<void>(`/admin/placeholders/${encodeURIComponent(imageUrl)}`, { method: 'DELETE' })
+}
+
+// --- Catalog Ingestion v1 (OVICO) brand sources ------------------------
+
+export function getOvicoBrandSources() {
+	return apiFetch<OvicoBrandSourcesEntry[]>('/admin/ovico-sources')
+}
+
+export function addOvicoBrandSource(brandId: string, sourceUrl: string, status?: OvicoBrandSourceStatus) {
+	return apiFetch<OvicoBrandSource>('/admin/ovico-sources', {
+		method: 'POST',
+		body: JSON.stringify({ brandId, sourceUrl, status })
+	})
+}
+
+export function patchOvicoBrandSource(
+	id: number,
+	patch: Partial<Pick<OvicoBrandSource, 'sourceUrl' | 'status' | 'enabled'>>
+) {
+	return apiFetch<OvicoBrandSource>(`/admin/ovico-sources/${id}`, {
+		method: 'PATCH',
+		body: JSON.stringify(patch)
+	})
+}
+
+export function removeOvicoBrandSource(id: number) {
+	return apiFetch<void>(`/admin/ovico-sources/${id}`, { method: 'DELETE' })
+}
+
+export function syncOvicoBrandSource(id: number) {
+	return apiFetch<OvicoCatalogSyncResult>(`/admin/ovico-sources/${id}/sync`, { method: 'POST' })
 }

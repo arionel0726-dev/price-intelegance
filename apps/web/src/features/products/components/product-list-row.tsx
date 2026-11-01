@@ -14,6 +14,14 @@ type ProductListRowProps = {
 // ProductCard, laid out for scanning many rows at once. The whole row is
 // the click/keyboard target (a real <Link>).
 export function ProductListRow({ product, onNavigateAway }: ProductListRowProps) {
+	// Catalog Ingestion v1 (OVICO) - same reasoning as ProductCard: an
+	// OVICO row's `product.id` is a competitor_products id, not a Vizaje
+	// products id, so it links to the real ovico.md product page instead
+	// of the internal /products/:id detail route.
+	if (product.source === 'ovico') {
+		return <OvicoListRow product={product} />
+	}
+
 	const variantLabel = product.variantLabel ?? product.volume
 	const matchState = comparePrices(product.price, product.competitorPrice)
 	const coverageLabel =
@@ -78,5 +86,56 @@ export function ProductListRow({ product, onNavigateAway }: ProductListRowProps)
 				/>
 			</div>
 		</Link>
+	)
+}
+
+function OvicoListRow({ product }: { product: ProductFamily }) {
+	return (
+		<a
+			href={product.url ?? undefined}
+			target="_blank"
+			rel="noopener noreferrer"
+			className="group grid grid-cols-[56px_1fr] items-center gap-4 rounded border border-hairline bg-card px-4 py-3 transition-colors hover:border-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent sm:grid-cols-[64px_1fr_160px]"
+		>
+			<div className="relative aspect-square size-14 shrink-0 overflow-hidden rounded bg-surface">
+				{product.imageUrl ? (
+					<Image
+						src={product.imageUrl}
+						alt={product.name}
+						fill
+						className="object-contain p-2"
+					/>
+				) : (
+					<div className="flex h-full items-center justify-center text-[10px] text-text-muted">
+						No image
+					</div>
+				)}
+			</div>
+
+			<div className="min-w-0">
+				<p className="text-xs font-medium uppercase tracking-[0.1em] text-text-secondary">
+					{product.brand}
+				</p>
+
+				<h2 className="mt-0.5 truncate text-sm font-normal leading-snug text-text-primary sm:text-base">
+					{product.name}
+				</h2>
+
+				{product.volume && <p className="mt-0.5 text-xs text-text-muted sm:text-sm">{product.volume}</p>}
+
+				<p className="mt-0.5 text-xs text-text-muted">
+					{product.externalCode ? `OVICO code: ${product.externalCode}` : 'OVICO'}
+					{product.availability === false ? ' · Unavailable' : ''}
+				</p>
+
+				<p className="mt-1.5 text-base font-medium tabular-nums sm:hidden">
+					<PriceText price={product.price} state="neutral" />
+				</p>
+			</div>
+
+			<div className="hidden text-right text-base font-medium tabular-nums sm:block">
+				<PriceText price={product.price} state="neutral" />
+			</div>
+		</a>
 	)
 }

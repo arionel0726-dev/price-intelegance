@@ -14,11 +14,13 @@ import {
 	serializeCatalogFilters,
 	writeCatalogPreferences,
 	type CatalogFilters,
+	type CatalogSource,
 	type CatalogView
 } from '../lib/catalog-url-state'
 import { useCatalogScrollRestoration } from '../lib/use-catalog-scroll-restoration'
 import { useProductFilters } from '../queries/use-product-filters'
 import { useProducts } from '../queries/use-products'
+import { CatalogSourceSwitcher } from './catalog-source-switcher'
 import { CatalogToolbar } from './catalog-toolbar'
 import { Pagination } from './pagination'
 import { ProductCard } from './product-card'
@@ -97,6 +99,24 @@ export function Catalog() {
 		}
 	}
 
+	function changeSource(source: CatalogSource) {
+		// A deliberate action, same committed-navigation treatment as
+		// changePage/commitFilterChange (real history entry, so Back
+		// returns to the previous source) - resets page to 1 but keeps
+		// search/brand, so e.g. "armani" + brand=giorgio-armani survives a
+		// Vizaje<->OVICO switch per spec ("brand filter preserved").
+		// category is dropped on switching to OVICO (no competitor
+		// equivalent exists for it in v1), restored on switching back.
+		router.push(
+			buildUrl({
+				source,
+				page: CATALOG_DEFAULTS.page,
+				category: source === 'ovico' ? CATALOG_DEFAULTS.category : filters.category
+			}),
+			{ scroll: false }
+		)
+	}
+
 	function changeView(view: CatalogView) {
 		// Display preference, not a filter - must NOT reset page, and
 		// (per the brief) shouldn't pollute history either; replace keeps
@@ -125,7 +145,8 @@ export function Catalog() {
 		limit: PAGE_SIZE,
 		search: filters.search,
 		brand: filters.brand,
-		category: filters.category
+		category: filters.category,
+		source: filters.source
 	})
 
 	const catalogUrl = `${pathname}?${searchParams.toString()}`
@@ -150,13 +171,17 @@ export function Catalog() {
 
 	return (
 		<>
+			<div className="mb-4">
+				<CatalogSourceSwitcher source={filters.source} onSourceChange={changeSource} />
+			</div>
+
 			<CatalogToolbar
 				search={searchInput}
 				brand={filters.brand}
 				category={filters.category}
 				view={filters.view}
 				brands={filterOptions?.brands ?? []}
-				categories={filterOptions?.categories ?? []}
+				categories={filters.source === 'ovico' ? [] : (filterOptions?.categories ?? [])}
 				productCount={pagination?.total}
 				isLoading={isLoading}
 				onSearchChange={setSearchInput}

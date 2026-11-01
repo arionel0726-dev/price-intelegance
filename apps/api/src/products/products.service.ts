@@ -59,6 +59,11 @@ export type ProductsListQuery = {
   search?: string;
   brand?: string;
   category?: string;
+  // Catalog Ingestion v1 (OVICO) - 'vizaje' (default) keeps today's
+  // behavior entirely; 'ovico' dispatches to findAllOvicoCatalog below
+  // instead, a fully separate query path (see that method's comment for
+  // why it doesn't share findAll's family-grouping logic).
+  source?: 'vizaje' | 'ovico';
 };
 
 export type VariantType = 'volume' | 'shade' | 'variant';
@@ -148,6 +153,10 @@ export class ProductsService {
   // happens entirely in SQL: never only on the current page's 40 rows, since
   // siblings can land on different DB pages.
   async findAll(query: ProductsListQuery) {
+    if (query.source === 'ovico') {
+      return this.findAllOvicoCatalog(query);
+    }
+
     const page = Math.max(1, Math.floor(query.page ?? 1));
     const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.floor(query.limit ?? DEFAULT_PAGE_SIZE)));
     const offset = (page - 1) * limit;
@@ -358,6 +367,114 @@ export class ProductsService {
         limit,
         total,
         skuTotal,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    };
+  }
+
+  // Catalog Ingestion v1 (OVICO) - a deliberately separate, much simpler
+  // query path from findAll() above: no variant-family grouping (v1
+  // persists exactly one variant per competitor product, see
+  // ovico-catalog-persistence.service.ts), no policy/visibility filtering
+  // (that's a Vizaje-only concept - competitor_products has no catalog
+  // visibility policy). Returns the same {items, pagination} shape so the
+  // frontend's existing catalog list/pagination plumbing doesn't need a
+  // parallel code path. `category` is accepted but ignored (no category
+  // data is parsed from OVICO's listing pages in v1) - per spec, a Vizaje-
+  // only filter with no competitor equivalent is gracefully ignored, not
+  // an error.
+  private async findAllOvicoCatalog(query: ProductsListQuery) {
+    const page = Math.max(1, Math.floor(query.page ?? 1));
+    const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.floor(query.limit ?? DEFAULT_PAGE_SIZE)));
+    const offset = (page - 1) * limit;
+
+    const [ovicoCompetitor] = await this.database.db
+      .select({ id: competitors.id })
+      .from(competitors)
+      .where(eq(competitors.domain, 'ovico.md'))
+      .limit(1);
+
+    if (!ovicoCompetitor) {
+      return {
+        items: [],
+        pagination: { page, limit, total: 0, skuTotal: 0, totalPages: 1 },
+      };
+    }
+
+    const conditions = [eq(competitorProducts.competitorId, ovicoCompetitor.id)];
+
+    if (query.search?.trim()) {
+      conditions.push(ilike(competitorProducts.title, `%${query.search.trim()}%`));
+    }
+
+    if (query.brand?.trim() && query.brand !== 'all') {
+      conditions.push(eq(competitorProducts.brandId, canonicalBrand(query.brand)));
+    }
+
+    const where = and(...conditions);
+
+    const [totals, rows] = await Promise.all([
+      this.database.db
+        .select({ total: count() })
+        .from(competitorProducts)
+        .where(where)
+        .then(rows => rows[0]!),
+      this.database.db
+        .select({
+          id: competitorProducts.id,
+          brandId: competitorProducts.brandId,
+          brand: competitorProducts.brand,
+          title: competitorProducts.title,
+          imageUrl: competitorProducts.imageUrl,
+          url: competitorProducts.url,
+          externalId: competitorProducts.externalId,
+          createdAt: competitorProducts.createdAt,
+          updatedAt: competitorProducts.updatedAt,
+          price: competitorProductVariants.price,
+          oldPrice: competitorProductVariants.oldPrice,
+          concentration: competitorProductVariants.concentration,
+          available: competitorProductVariants.available,
+        })
+        .from(competitorProducts)
+        .innerJoin(
+          competitorProductVariants,
+          eq(competitorProductVariants.competitorProductId, competitorProducts.id),
+        )
+        .where(where)
+        .orderBy(asc(competitorProducts.title), asc(competitorProducts.id))
+        .limit(limit)
+        .offset(offset),
+    ]);
+
+    const total = Number(totals.total);
+
+    return {
+      items: rows.map(row => ({
+        id: row.id,
+        source: 'ovico' as const,
+        brand: row.brandId ?? row.brand,
+        name: row.title,
+        category: null,
+        volume: row.concentration,
+        color: null,
+        imageUrl: row.imageUrl,
+        price: row.price,
+        priceVaries: false,
+        oldPrice: row.oldPrice,
+        competitorPrice: null,
+        variantCount: 1,
+        variantLabel: null,
+        externalCode: row.externalId,
+        url: row.url,
+        availability: row.available,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+      })),
+      pagination: {
+        page,
+        limit,
+        total,
+        skuTotal: total,
         totalPages: Math.max(1, Math.ceil(total / limit)),
       },
     };

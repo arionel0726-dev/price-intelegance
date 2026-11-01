@@ -10,6 +10,8 @@ class ProductsListQueryDto {
   category?: string;
   // Admin/Data Quality escape hatch - see ProductsListQuery.includeHidden.
   includeHidden?: string;
+  // Catalog Ingestion v1 (OVICO) - see ProductsListQuery.source.
+  source?: string;
 }
 
 @Controller('products')
@@ -25,6 +27,7 @@ export class ProductsController {
       brand: query.brand,
       category: query.category,
       includeHidden: query.includeHidden === 'true',
+      source: query.source === 'ovico' ? 'ovico' : 'vizaje',
     });
   }
 

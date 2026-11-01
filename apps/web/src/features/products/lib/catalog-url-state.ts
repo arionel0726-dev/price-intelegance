@@ -7,12 +7,18 @@
 // ever goes through either of these.
 export type CatalogView = 'grid' | 'list'
 
+// Catalog Ingestion v1 (OVICO) - which local catalog the page browses.
+// 'vizaje' is the default and the only source with no corresponding
+// competitor equivalent for `category`; see parseCatalogSearchParams.
+export type CatalogSource = 'vizaje' | 'ovico'
+
 export type CatalogFilters = {
 	search: string
 	brand: string
 	category: string
 	view: CatalogView
 	page: number
+	source: CatalogSource
 }
 
 export const CATALOG_DEFAULTS: CatalogFilters = {
@@ -20,7 +26,8 @@ export const CATALOG_DEFAULTS: CatalogFilters = {
 	brand: 'all',
 	category: 'all',
 	view: 'grid',
-	page: 1
+	page: 1,
+	source: 'vizaje'
 }
 
 const PARAM = {
@@ -28,11 +35,16 @@ const PARAM = {
 	brand: 'brand',
 	category: 'category',
 	view: 'view',
-	page: 'page'
+	page: 'page',
+	source: 'source'
 } as const
 
 function isCatalogView(value: string | null): value is CatalogView {
 	return value === 'grid' || value === 'list'
+}
+
+function isCatalogSource(value: string | null): value is CatalogSource {
+	return value === 'vizaje' || value === 'ovico'
 }
 
 function parsePage(value: string | null): number | null {
@@ -69,6 +81,9 @@ export function parseCatalogSearchParams(
 	const page = parsePage(searchParams.get(PARAM.page))
 	if (page !== null) result.page = page
 
+	const source = searchParams.get(PARAM.source)
+	if (isCatalogSource(source)) result.source = source
+
 	return result
 }
 
@@ -84,6 +99,7 @@ export function serializeCatalogFilters(filters: CatalogFilters): string {
 	if (filters.category !== CATALOG_DEFAULTS.category) query.set(PARAM.category, filters.category)
 	if (filters.view !== CATALOG_DEFAULTS.view) query.set(PARAM.view, filters.view)
 	if (filters.page !== CATALOG_DEFAULTS.page) query.set(PARAM.page, String(filters.page))
+	if (filters.source !== CATALOG_DEFAULTS.source) query.set(PARAM.source, filters.source)
 
 	return query.toString()
 }
@@ -173,6 +189,11 @@ export function resolveCatalogFilters(
 		brand: fromUrl.brand ?? preferences.lastBrand,
 		category: fromUrl.category ?? preferences.lastCategory,
 		view: fromUrl.view ?? preferences.view,
-		page: fromUrl.page ?? CATALOG_DEFAULTS.page
+		page: fromUrl.page ?? CATALOG_DEFAULTS.page,
+		// Not sourced from localStorage - unlike view/brand/category, which
+		// SHOULD persist head-to-head catalog page across visits, switching
+		// source is a deliberate action to take each time; a stale OVICO
+		// source hanging around from a previous visit would be surprising.
+		source: fromUrl.source ?? CATALOG_DEFAULTS.source
 	}
 }

@@ -7,7 +7,9 @@ const SECTIONS = [
 	{ href: '/admin/brands', label: 'Brands' },
 	{ href: '/admin/products', label: 'Products' },
 	{ href: '/admin/discovery', label: 'Discovery Rules' },
-	{ href: '/admin/data-quality', label: 'Data Quality' }
+	{ href: '/admin/data-quality', label: 'Data Quality' },
+	// Catalog Ingestion v1 (OVICO)
+	{ href: '/admin/ovico-sources', label: 'OVICO Sources' }
 ]
 
 export function AdminNav() {
